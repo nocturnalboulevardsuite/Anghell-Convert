@@ -1,9 +1,10 @@
 """
 Anghell Convert
-Convertidor de YouTube / Shorts a MP3, WAV o MP4 (4K, 1080p, 720p, 480p).
+Convertidor de YouTube / Shorts a MP3, WAV o MP4 (4K, 1080p, 720p, 480p)
+y descargador de sonidos de MyInstants en MP3 o WAV.
 
 Efectos:
-- Fondo de tierra volcánica renderizado en WebGL.
+- Fondo de tierra volcánica renderizado en WebGL, detrás del convertidor.
 - Lava que sube muy despacio durante 1 minuto hasta la mitad de la pantalla,
   se queda arriba, se vacía y vuelve a empezar (loop).
 - Cambio de tema: la lava inunda la pantalla, cambia el tema y la página
@@ -14,9 +15,11 @@ import html
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from urllib.parse import quote
 
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 import yt_dlp
@@ -36,8 +39,9 @@ def make_page_icon() -> Image.Image:
 
 st.set_page_config(page_title="Anghell Convert", page_icon=make_page_icon(), layout="centered")
 
-if "result" not in st.session_state:
-    st.session_state.result = None
+for k, v in {"result": None, "sounds": {}}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 
 def find_ffmpeg():
@@ -51,7 +55,25 @@ def find_ffmpeg():
         return None
 
 
+def find_js_runtime():
+    """YouTube exige un motor de JavaScript (Deno) para descargar con yt-dlp."""
+    path = shutil.which("deno")
+    if not path:
+        try:
+            import deno
+            path = deno.find_deno_bin()
+        except Exception:
+            path = None
+    if path:
+        return {"deno": {"path": path}}
+    node = shutil.which("node")
+    if node:
+        return {"node": {"path": node}}
+    return None
+
+
 FFMPEG = find_ffmpeg()
+JS_RUNTIME = find_js_runtime()
 
 FORMATS = {
     "MP3": {"kind": "audio", "ext": "mp3", "mime": "audio/mpeg"},
@@ -66,6 +88,14 @@ YT_REGEX = re.compile(
     r"^(https?://)?(www\.|m\.|music\.)?(youtube\.com/(watch\?v=|shorts/|live/|embed/)|youtu\.be/)[\w\-]{6,}",
     re.IGNORECASE,
 )
+
+MI_BASE = "https://www.myinstants.com"
+MI_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/130.0 Safari/537.36"),
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+}
+MI_MAX_RESULTS = 12
 
 
 # ════════════════════════════ Íconos dibujados (SVG) ════════════════════════════
@@ -84,12 +114,13 @@ ICONS = {
     "__I_WAVE__": icon_uri("<path d='M3 12h1.5M7 8.5v7M11 4v16M15 7v10M19 9.5v5M21.5 12h-.5'/>"),
     "__I_FILM__": icon_uri("<rect x='3' y='5' width='18' height='14' rx='3'/>"
                            "<path d='M10 9.5v5l4.3-2.5z'/>"),
+    "__I_SPEAKER__": icon_uri("<path d='M4 9.5h3.5L12 5.5v13l-4.5-4H4z'/>"
+                              "<path d='M15.5 9a4 4 0 0 1 0 6'/><path d='M18.5 6.5a7.5 7.5 0 0 1 0 11'/>"),
     "__I_CONVERT__": icon_uri("<path d='M4 12a8 8 0 0 1 13.7-5.6L20 8.5'/><path d='M20 4v4.5h-4.5'/>"
                               "<path d='M20 12a8 8 0 0 1-13.7 5.6L4 15.5'/><path d='M4 20v-4.5h4.5'/>"),
     "__I_DOWNLOAD__": icon_uri("<path d='M12 4v11'/><path d='M7 10.5l5 5 5-5'/><path d='M5 20h14'/>"),
 }
 
-# Textura de costra para el logo (ruido fractal generado en SVG)
 CRUST = (
     "<svg xmlns='http://www.w3.org/2000/svg' width='320' height='320'>"
     "<filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.024' numOctaves='3' seed='11'/>"
@@ -106,7 +137,7 @@ CSS = """
 
 :root {
   --bg: #060303;
-  --panel: rgba(12, 6, 5, 0.66);
+  --panel: rgba(12, 6, 5, 0.70);
   --pill: rgba(22, 10, 8, 0.72);
   --text: #fbefe6;
   --muted: #b39d92;
@@ -115,29 +146,34 @@ CSS = """
   --glow: rgba(255, 60, 0, 0.38);
   --lava: linear-gradient(100deg, #6e0800, #ff2a00 18%, #ffb000 32%, #ff4a00 48%,
                           #9a0e00 62%, #ff6a00 78%, #ffd36a 88%, #b81400);
+  color-scheme: dark;
 }
 :root[data-ac-theme="light"] {
   --bg: #f3e7dc;
-  --panel: rgba(255, 249, 243, 0.76);
-  --pill: rgba(255, 255, 255, 0.78);
+  --panel: rgba(255, 249, 243, 0.80);
+  --pill: rgba(255, 255, 255, 0.80);
   --text: #1c0a04;
   --muted: #6e4f40;
   --border: rgba(200, 60, 10, 0.32);
   --input: rgba(255, 255, 255, 0.94);
   --glow: rgba(255, 90, 20, 0.25);
+  color-scheme: light;
 }
 
-html, body { background: var(--bg) !important; }
+/* El fondo pintado va en <html>; todo lo demás transparente para que la lava
+   (z-index -1) quede DETRÁS del convertidor y el convertidor siempre visible. */
+html { background: var(--bg) !important; }
+body, #root, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"],
+[data-testid="stBottom"], [data-testid="stBottomBlockContainer"] { background: transparent !important; }
 .stApp, .stApp p, .stApp label, .stApp span, .stApp div, .stApp input, .stApp button {
   font-family: 'Manrope', system-ui, sans-serif;
 }
-.stApp { background: transparent !important; color: var(--text); position: relative; z-index: 1; }
+.stApp { color: var(--text); }
 [data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"] { display: none !important; }
 
-/* Lienzo de lava (WebGL) */
-#ac-lava { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0;
+#ac-lava { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: -1;
            pointer-events: none; display: block; }
-#ac-lava-fallback { position: fixed; left: 0; right: 0; bottom: 0; height: 2vh; z-index: 0;
+#ac-lava-fallback { position: fixed; left: 0; right: 0; bottom: 0; height: 2vh; z-index: -1;
   pointer-events: none;
   background: linear-gradient(to top, #4a0400, #c42200 55%, #ff8a10 92%, #ffd27a);
   box-shadow: 0 -30px 80px rgba(255, 80, 0, .45);
@@ -145,14 +181,14 @@ html, body { background: var(--bg) !important; }
 @keyframes ac-fb-rise { 0% { height: 2vh } 60% { height: 50vh } 72% { height: 50vh }
                         96% { height: 2vh } 100% { height: 2vh } }
 
-/* Componente invisible que arranca el motor */
 div[data-testid="stElementContainer"]:has(iframe),
+div[data-testid="stElementContainer"]:has(.ac-engine-host),
 .element-container:has(iframe) { display: none !important; }
 
 /* Panel de vidrio que gira como una página */
 [data-testid="stMain"], section.main { perspective: 1800px; }
 .block-container, [data-testid="stMainBlockContainer"] {
-  max-width: 760px;
+  max-width: 780px;
   margin-top: 4.5rem; margin-bottom: 4rem;
   padding: 2.2rem 2.2rem 1.6rem !important;
   background: var(--panel);
@@ -192,7 +228,7 @@ div[data-testid="stElementContainer"]:has(iframe),
 #ac-theme-toggle.ac-busy { pointer-events: none; }
 
 /* ─────────────── Logo de lava ─────────────── */
-.ac-hero { text-align: center; margin-bottom: 1.4rem; }
+.ac-hero { text-align: center; margin-bottom: 1.2rem; }
 .ac-emblem { display: inline-block; animation: ac-pulse 3.2s ease-in-out infinite; }
 .ac-emblem svg { width: 92px; height: 92px; display: block; }
 @keyframes ac-pulse {
@@ -240,7 +276,25 @@ div[data-testid="stElementContainer"]:has(iframe),
                      80% { height: 6px } 100% { height: 0 } }
 @keyframes ac-fall { 0%, 62% { opacity: 0; transform: translateY(0) }
                      64% { opacity: 1 } 100% { opacity: 0; transform: translateY(80px) scale(.6) } }
-.ac-sub { color: var(--muted) !important; font-size: 1.02rem; margin: 1.1rem auto 0; max-width: 46ch; }
+.ac-sub { color: var(--muted) !important; font-size: 1.02rem; margin: 1.1rem auto 0; max-width: 48ch; }
+
+/* ─────────────── Pestañas ─────────────── */
+.stTabs [data-baseweb="tab-list"] { gap: .35rem; border-bottom: 1px solid var(--border); }
+.stTabs [data-baseweb="tab-border"] { display: none; }
+.stTabs [data-baseweb="tab"] {
+  background: transparent; color: var(--muted); padding: .65rem 1rem; border-radius: 12px 12px 0 0;
+  display: inline-flex; align-items: center; transition: color .2s, background .2s; }
+.stTabs [data-baseweb="tab"] p { color: inherit !important; font-weight: 700; font-size: .98rem; }
+.stTabs [data-baseweb="tab"]:hover { color: var(--text); background: var(--pill); }
+.stTabs [data-baseweb="tab"][aria-selected="true"] { color: var(--text); }
+.stTabs [data-baseweb="tab-highlight"] { background: var(--lava) !important; background-size: 320% 100% !important;
+  height: 3px; border-radius: 3px; animation: ac-btnflow 5s linear infinite; }
+.stTabs [data-baseweb="tab"]::before {
+  content: ""; width: 17px; height: 17px; margin-right: .5rem; background: currentColor;
+  -webkit-mask: __I_FILM__ center / contain no-repeat; mask: __I_FILM__ center / contain no-repeat; }
+.stTabs [data-baseweb="tab"]:nth-child(2)::before {
+  -webkit-mask-image: __I_SPEAKER__; mask-image: __I_SPEAKER__; }
+.stTabs [data-baseweb="tab"][aria-selected="true"]::before { background: #ff5a00; }
 
 /* ─────────────── Controles ─────────────── */
 .stApp h1, .stApp h2, .stApp h3, .stApp p, .stApp label { color: var(--text); }
@@ -291,15 +345,34 @@ div[role="radiogroup"] > label:has(input:checked)::before { background: #ff5a00;
   font-family: 'Unbounded', sans-serif !important; font-weight: 700; color: #fff !important;
   text-shadow: 0 1px 2px rgba(60, 4, 0, .6); }
 .stButton > button::before, .stDownloadButton > button::before {
-  content: ""; width: 18px; height: 18px; margin-right: .55rem; background: #fff;
+  content: ""; width: 18px; height: 18px; margin-right: .55rem; flex-shrink: 0; background: #fff;
   -webkit-mask: __I_CONVERT__ center / contain no-repeat; mask: __I_CONVERT__ center / contain no-repeat; }
-.stDownloadButton > button::before { -webkit-mask-image: __I_DOWNLOAD__; mask-image: __I_DOWNLOAD__; }
+.stDownloadButton > button::before, [class*="st-key-mi_prep_"] button::before {
+  -webkit-mask-image: __I_DOWNLOAD__; mask-image: __I_DOWNLOAD__; }
 .stButton > button:hover, .stDownloadButton > button:hover {
   transform: translateY(-2px); box-shadow: 0 12px 36px var(--glow); }
 .stButton > button:disabled { filter: grayscale(.7) brightness(.8); opacity: .6; }
 .stButton > button:focus-visible, .stDownloadButton > button:focus-visible {
   outline: 2px solid #ff9a00 !important; outline-offset: 3px; }
 @keyframes ac-btnflow { to { background-position: 320% 50%; } }
+
+/* Botones secundarios en la lista de sonidos */
+[class*="st-key-mi_prep_"] button {
+  background: var(--pill) !important; border: 1px solid var(--border) !important;
+  animation: none !important; box-shadow: none !important; padding: .6rem .8rem !important; }
+[class*="st-key-mi_prep_"] button p { color: var(--text) !important; text-shadow: none;
+  font-family: 'Manrope', sans-serif !important; font-size: .9rem; }
+[class*="st-key-mi_prep_"] button::before { background: var(--text); }
+[class*="st-key-mi_prep_"] button:hover { border-color: #ff4d00 !important; }
+[class*="st-key-mi_dl_"] button { padding: .6rem .8rem !important; }
+[class*="st-key-mi_dl_"] button p { font-family: 'Manrope', sans-serif !important; font-size: .9rem; }
+
+/* Tarjetas */
+[data-testid="stVerticalBlockBorderWrapper"]:has(.ac-sound) {
+  background: var(--pill); border: 1px solid var(--border) !important; border-radius: 16px;
+  animation: ac-in .4s ease-out both; }
+.ac-sound { font-weight: 700; color: var(--text); line-height: 1.3; padding-top: .35rem; word-break: break-word; }
+[data-testid="stAudio"] audio, audio { width: 100%; height: 40px; }
 
 .ac-card {
   display: flex; gap: 1rem; align-items: center;
@@ -310,6 +383,11 @@ div[role="radiogroup"] > label:has(input:checked)::before { background: #ff5a00;
 .ac-card img { width: 168px; border-radius: 12px; flex-shrink: 0; }
 .ac-card .t { font-weight: 700; color: var(--text); line-height: 1.3; }
 .ac-card .m { color: var(--muted); font-size: .9rem; margin-top: .35rem; }
+
+[data-testid="stExpander"] details { background: var(--pill); border: 1px solid var(--border) !important;
+  border-radius: 14px; }
+[data-testid="stExpander"] summary p { color: var(--muted) !important; font-weight: 600; }
+[data-testid="stFileUploaderDropzone"] { background: var(--input) !important; border: 1px dashed var(--border) !important; }
 
 .stProgress > div > div > div > div,
 [data-testid="stProgress"] [role="progressbar"] > div > div {
@@ -373,62 +451,91 @@ LOGO = """
       <i style="left:88%;--d:3.2s"></i>
     </div>
   </div>
-  <p class="ac-sub">Pega un enlace de YouTube o Shorts y elige el formato.</p>
+  <p class="ac-sub">Convierte videos de YouTube y descarga sonidos de MyInstants.</p>
 </div>
 """
 st.markdown(LOGO, unsafe_allow_html=True)
 
 
-# ════════════════════════════ Lógica de descarga ════════════════════════════
+# ════════════════════════════ Errores legibles ════════════════════════════
+def explain_error(err: Exception) -> str:
+    low = str(err).lower()
+    if isinstance(err, requests.exceptions.RequestException):
+        return "No hubo respuesta del sitio. Revisa tu conexión a internet e inténtalo de nuevo."
+    if "sign in to confirm" in low or "not a bot" in low:
+        return ("YouTube bloqueó la descarga desde este servidor con su verificación anti-bot. "
+                "Sube tu archivo de cookies de YouTube en Opciones avanzadas o ejecuta la app en tu computador.")
+    if "javascript" in low or "challenge" in low or "js runtime" in low or "ejs" in low:
+        return ("Falta el motor de JavaScript que YouTube ahora exige. Reinstala las dependencias con "
+                "pip install -r requirements.txt (incluye deno y yt-dlp-ejs).")
+    if "ffmpeg" in low or "ffprobe" in low:
+        return "FFmpeg no está disponible. Reinstala las dependencias o instala FFmpeg en el sistema."
+    if "requested format is not available" in low:
+        return "YouTube no entregó ese formato para este video. Prueba con otra calidad."
+    if "private video" in low:
+        return "El video es privado."
+    if "age" in low and ("confirm" in low or "restricted" in low):
+        return "El video tiene restricción de edad. Sube tus cookies de YouTube en Opciones avanzadas."
+    if "http error 403" in low or "forbidden" in low:
+        return "YouTube rechazó la descarga (403). Actualiza yt-dlp con pip install -U \"yt-dlp[default]\"."
+    if "unavailable" in low:
+        return "El video no está disponible en esta región o fue eliminado."
+    return "No se pudo completar la operación."
+
+
+def show_error(err: Exception, prefix: str = ""):
+    st.error((prefix + " " if prefix else "") + explain_error(err))
+    with st.expander("Detalle técnico"):
+        st.code(str(err)[:3000], language=None)
+
+
+# ════════════════════════════ YouTube ════════════════════════════
+def base_opts(cookiefile=None) -> dict:
+    opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
+            "retries": 3, "fragment_retries": 3, "concurrent_fragment_downloads": 4}
+    if FFMPEG:
+        opts["ffmpeg_location"] = FFMPEG
+    if JS_RUNTIME:
+        opts["js_runtimes"] = JS_RUNTIME
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
+    return opts
+
+
 @st.cache_data(ttl=900, show_spinner=False)
-def get_info(url: str) -> dict:
-    with yt_dlp.YoutubeDL({"quiet": True, "noplaylist": True, "skip_download": True}) as ydl:
+def get_info(url: str, cookiefile=None) -> dict:
+    with yt_dlp.YoutubeDL({**base_opts(cookiefile), "skip_download": True}) as ydl:
         info = ydl.extract_info(url, download=False)
-    heights = sorted({f.get("height") for f in info.get("formats", []) if f.get("height")})
+    heights = sorted({f.get("height") for f in info.get("formats") or [] if f.get("height")})
     return {
-        "title": info.get("title", "Sin título"),
-        "uploader": info.get("uploader", ""),
+        "title": info.get("title") or "Sin título",
+        "uploader": info.get("uploader") or "",
         "duration": info.get("duration") or 0,
         "thumbnail": info.get("thumbnail"),
         "max_height": heights[-1] if heights else 0,
     }
 
 
-def fmt_duration(sec: int) -> str:
-    m, s = divmod(int(sec), 60)
+def fmt_duration(sec) -> str:
+    m, s = divmod(int(sec or 0), 60)
     h, m = divmod(m, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def build_options(choice: str, outdir: str, hook) -> dict:
+def format_candidates(choice: str):
     cfg = FORMATS[choice]
-    opts = {
-        "outtmpl": os.path.join(outdir, "%(title).90s.%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "progress_hooks": [hook],
-    }
-    if FFMPEG:
-        opts["ffmpeg_location"] = FFMPEG
-
     if cfg["kind"] == "audio":
-        pp = {"key": "FFmpegExtractAudio", "preferredcodec": cfg["ext"]}
-        if cfg["ext"] == "mp3":
-            pp["preferredquality"] = "320"
-        opts.update({"format": "bestaudio/best", "postprocessors": [pp]})
-    else:
-        h = cfg["height"]
-        opts.update({
-            "format": (f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/"
-                       f"bv*[height<={h}]+ba/b[height<={h}]/b"),
-            "merge_output_format": "mp4",
-        })
-    return opts
+        return ["bestaudio/best", "best"]
+    h = cfg["height"]
+    return [
+        f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/bv*[height<={h}]+ba/b[height<={h}]",
+        f"bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b",
+        "b",
+    ]
 
 
-def convert(url: str, choice: str):
-    outdir = tempfile.mkdtemp(prefix="anghell_")
+def convert(url: str, choice: str, cookiefile=None):
+    cfg = FORMATS[choice]
     bar = st.progress(0, text="Preparando")
 
     def hook(d):
@@ -440,66 +547,257 @@ def convert(url: str, choice: str):
         elif d["status"] == "finished":
             bar.progress(1.0, text="Convirtiendo con FFmpeg")
 
-    try:
-        with yt_dlp.YoutubeDL(build_options(choice, outdir, hook)) as ydl:
-            ydl.download([url])
+    last_err = None
+    for fmt in format_candidates(choice):
+        outdir = tempfile.mkdtemp(prefix="anghell_")
+        try:
+            opts = {**base_opts(cookiefile),
+                    "outtmpl": os.path.join(outdir, "%(title).90s.%(ext)s"),
+                    "progress_hooks": [hook], "format": fmt}
+            if cfg["kind"] == "audio":
+                pp = {"key": "FFmpegExtractAudio", "preferredcodec": cfg["ext"]}
+                if cfg["ext"] == "mp3":
+                    pp["preferredquality"] = "320"
+                opts["postprocessors"] = [pp]
+            else:
+                opts["merge_output_format"] = "mp4"
+                opts["postprocessors"] = [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}]
 
-        ext = FORMATS[choice]["ext"]
-        files = [f for f in os.listdir(outdir) if f.lower().endswith("." + ext)]
-        if not files:
-            raise RuntimeError("No se generó el archivo final. Revisa que FFmpeg esté instalado.")
-        path = max((os.path.join(outdir, f) for f in files), key=os.path.getsize)
-        with open(path, "rb") as fh:
-            data = fh.read()
-        bar.progress(1.0, text="Listo")
-        return {"name": os.path.basename(path), "data": data, "mime": FORMATS[choice]["mime"]}
-    finally:
-        shutil.rmtree(outdir, ignore_errors=True)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+
+            files = [f for f in os.listdir(outdir) if f.lower().endswith("." + cfg["ext"])]
+            if not files:
+                raise RuntimeError("FFmpeg no generó el archivo final.")
+            path = max((os.path.join(outdir, f) for f in files), key=os.path.getsize)
+            with open(path, "rb") as fh:
+                data = fh.read()
+            bar.progress(1.0, text="Listo")
+            return {"name": os.path.basename(path), "data": data, "mime": cfg["mime"]}
+        except yt_dlp.utils.DownloadError as e:
+            last_err = e
+            if "requested format is not available" not in str(e).lower():
+                break
+        finally:
+            shutil.rmtree(outdir, ignore_errors=True)
+    bar.empty()
+    raise last_err or RuntimeError("Error desconocido.")
+
+
+# ════════════════════════════ MyInstants ════════════════════════════
+PLAY_RE = re.compile(
+    r"""play\(\s*['"]([^'"]+?\.mp3)['"](?:\s*,\s*['"][^'"]*['"]\s*,\s*['"]([^'"]*)['"])?""")
+LINK_RE = re.compile(
+    r"""href=["'](?:https?://www\.myinstants\.com)?/(?:[a-z]{2}/)?instant/([^/"'?#]+)/?["'][^>]*>\s*([^<]+?)\s*</a>""")
+
+
+def mi_abs(path: str) -> str:
+    return path if path.startswith("http") else MI_BASE + path
+
+
+def mi_name_from_file(path: str) -> str:
+    return os.path.splitext(os.path.basename(path))[0].replace("-", " ").replace("_", " ").strip()
+
+
+def parse_mi_html(text: str):
+    names, order = {}, []
+    for slug, name in LINK_RE.findall(text):
+        if slug not in names:
+            names[slug] = html.unescape(name).strip()
+            order.append(slug)
+    out, seen = [], set()
+    for i, (path, slug) in enumerate(PLAY_RE.findall(text)):
+        url = mi_abs(path)
+        if url in seen:
+            continue
+        seen.add(url)
+        if not slug and i < len(order):
+            slug = order[i]
+        out.append({"name": names.get(slug) or mi_name_from_file(path), "slug": slug or url, "sound": url})
+    return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def mi_search(query: str):
+    results = []
+    try:
+        r = requests.get(f"{MI_BASE}/es/search/", params={"name": query}, headers=MI_HEADERS, timeout=15)
+        r.raise_for_status()
+        results = parse_mi_html(r.text)
+    except Exception:
+        results = []
+    if not results:
+        r = requests.get(f"{MI_BASE}/api/v1/instants/", params={"name": query, "page": 1},
+                         headers=MI_HEADERS, timeout=15)
+        r.raise_for_status()
+        words = [w for w in query.lower().split() if w]
+        for it in r.json().get("results", []):
+            name = it.get("name") or ""
+            if it.get("sound") and all(w in name.lower() for w in words):
+                results.append({"name": name, "slug": it.get("slug") or it["sound"], "sound": mi_abs(it["sound"])})
+    return results[:MI_MAX_RESULTS]
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def mi_from_link(link: str):
+    link = link.strip()
+    if link.lower().split("?")[0].endswith(".mp3"):
+        return [{"name": mi_name_from_file(link), "slug": link, "sound": mi_abs(link)}]
+    m = re.search(r"/instant/([^/?#]+)", link)
+    if not m:
+        raise ValueError("Ese enlace de MyInstants no apunta a un sonido. Abre el sonido y copia su enlace.")
+    slug = m.group(1)
+    try:
+        r = requests.get(f"{MI_BASE}/api/v1/instants/{slug}/", headers=MI_HEADERS, timeout=15)
+        r.raise_for_status()
+        it = r.json()
+        if it.get("sound"):
+            return [{"name": it.get("name") or slug, "slug": slug, "sound": mi_abs(it["sound"])}]
+    except Exception:
+        pass
+    url = link if link.startswith("http") else "https://" + link
+    r = requests.get(url, headers=MI_HEADERS, timeout=15)
+    r.raise_for_status()
+    found = parse_mi_html(r.text)
+    if not found:
+        mp3 = re.search(r"""(/media/sounds/[^"'\s]+?\.mp3)""", r.text)
+        if not mp3:
+            raise ValueError("No encontré el audio en esa página.")
+        found = [{"name": slug.replace("-", " "), "slug": slug, "sound": mi_abs(mp3.group(1))}]
+    t = re.search(r"<h1[^>]*>\s*([^<]+?)\s*</h1>", r.text)
+    if t:
+        found[0]["name"] = html.unescape(t.group(1))
+    found[0]["slug"] = slug
+    return found[:1]
+
+
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=64)
+def fetch_bytes(url: str) -> bytes:
+    r = requests.get(url, headers=MI_HEADERS, timeout=30)
+    r.raise_for_status()
+    if len(r.content) > 25 * 1024 * 1024:
+        raise ValueError("El archivo es demasiado grande.")
+    return r.content
+
+
+def mp3_to_wav(data: bytes) -> bytes:
+    if not FFMPEG:
+        raise RuntimeError("ffmpeg no disponible")
+    with tempfile.TemporaryDirectory() as d:
+        src, dst = os.path.join(d, "in.mp3"), os.path.join(d, "out.wav")
+        with open(src, "wb") as fh:
+            fh.write(data)
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-i", src, "-ar", "44100", dst],
+                       check=True, capture_output=True)
+        with open(dst, "rb") as fh:
+            return fh.read()
+
+
+def safe_filename(name: str) -> str:
+    name = re.sub(r'[\\/:*?"<>|]+', "", name).strip()
+    return (name or "sonido")[:80]
 
 
 # ════════════════════════════ Interfaz ════════════════════════════
-url = st.text_input("Enlace del video",
-                    placeholder="https://youtube.com/watch?v=...  o  https://youtube.com/shorts/...")
+tab_yt, tab_mi = st.tabs(["YouTube", "Sonidos MyInstants"])
 
-info = None
-if url:
-    if not YT_REGEX.match(url.strip()):
-        st.error("Ese enlace no parece de YouTube. Usa uno de youtube.com, youtu.be o un Short.")
-    else:
+with tab_yt:
+    url = st.text_input("Enlace del video", key="yt_url",
+                        placeholder="https://youtube.com/watch?v=...  o  https://youtube.com/shorts/...")
+
+    with st.expander("Opciones avanzadas"):
+        st.caption("Si YouTube pide verificar que no eres un bot, exporta tus cookies de YouTube "
+                   "en formato cookies.txt con una extensión del navegador y súbelas aquí.")
+        cookie_up = st.file_uploader("Archivo cookies.txt", type=["txt"], key="cookies")
+    cookiefile = None
+    if cookie_up is not None:
+        cookiefile = os.path.join(tempfile.gettempdir(), f"anghell_cookies_{abs(hash(cookie_up.name))}.txt")
+        with open(cookiefile, "wb") as fh:
+            fh.write(cookie_up.getvalue())
+
+    info = None
+    if url:
+        if not YT_REGEX.match(url.strip()):
+            st.error("Ese enlace no parece de YouTube. Usa uno de youtube.com, youtu.be o un Short.")
+        else:
+            try:
+                with st.spinner("Leyendo el video"):
+                    info = get_info(url.strip(), cookiefile)
+                thumb = (f'<img src="{html.escape(info["thumbnail"])}" alt="Miniatura del video">'
+                         if info["thumbnail"] else "")
+                st.markdown(
+                    f'<div class="ac-card">{thumb}<div>'
+                    f'<div class="t">{html.escape(info["title"])}</div>'
+                    f'<div class="m">{html.escape(info["uploader"])} | {fmt_duration(info["duration"])}'
+                    f' | hasta {info["max_height"]}p</div></div></div>',
+                    unsafe_allow_html=True,
+                )
+            except Exception as e:
+                show_error(e, "No se pudo leer el video.")
+
+    choice = st.radio("Formato", list(FORMATS.keys()), horizontal=True, index=0, key="yt_fmt")
+
+    if info and FORMATS[choice]["kind"] == "video" and 0 < info["max_height"] < FORMATS[choice]["height"]:
+        st.info(f"Este video llega hasta {info['max_height']}p; se descargará en la mejor calidad disponible.")
+    if not FFMPEG:
+        st.warning("FFmpeg no está disponible. Instálalo para convertir a MP3, WAV o unir video y audio en MP4.")
+    if not JS_RUNTIME:
+        st.warning("No encontré Deno. YouTube lo exige ahora: ejecuta pip install -r requirements.txt.")
+
+    if st.button("Convertir", disabled=info is None, key="convert"):
+        st.session_state.result = None
         try:
-            with st.spinner("Leyendo el video"):
-                info = get_info(url.strip())
-            thumb = (f'<img src="{html.escape(info["thumbnail"])}" alt="Miniatura del video">'
-                     if info["thumbnail"] else "")
-            st.markdown(
-                f'<div class="ac-card">{thumb}<div>'
-                f'<div class="t">{html.escape(info["title"])}</div>'
-                f'<div class="m">{html.escape(info["uploader"] or "")} | {fmt_duration(info["duration"])}'
-                f' | hasta {info["max_height"]}p</div></div></div>',
-                unsafe_allow_html=True,
-            )
+            st.session_state.result = convert(url.strip(), choice, cookiefile)
         except Exception as e:
-            st.error(f"No se pudo leer el video: {e}")
+            show_error(e, "La conversión falló.")
 
-choice = st.radio("Formato", list(FORMATS.keys()), horizontal=True, index=0)
+    if st.session_state.result:
+        r = st.session_state.result
+        st.success(f"{r['name']}  ({len(r['data']) / (1024 * 1024):.1f} MB)")
+        st.download_button("Descargar archivo", data=r["data"], file_name=r["name"],
+                           mime=r["mime"], key="yt_download")
 
-if info and FORMATS[choice]["kind"] == "video" and info["max_height"] < FORMATS[choice]["height"]:
-    st.info(f"Este video llega hasta {info['max_height']}p; se descargará en la mejor calidad disponible.")
+with tab_mi:
+    q = st.text_input("Busca un sonido o pega su enlace", key="mi_q",
+                      placeholder="vine boom, bruh, aplausos...  o  https://www.myinstants.com/es/instant/...")
+    mi_fmt = st.radio("Formato del sonido", ["MP3", "WAV"], horizontal=True, key="mi_fmt")
 
-if not FFMPEG:
-    st.warning("FFmpeg no está disponible. Instálalo para convertir a MP3, WAV o unir video y audio en MP4.")
+    if q.strip():
+        mi_failed = False
+        try:
+            with st.spinner("Buscando sonidos"):
+                is_link = "myinstants.com" in q.lower() or q.lower().strip().endswith(".mp3")
+                results = mi_from_link(q) if is_link else mi_search(q.strip())
+        except Exception as e:
+            results, mi_failed = [], True
+            show_error(e, "No se pudo consultar MyInstants.")
 
-if st.button("Convertir", disabled=info is None):
-    st.session_state.result = None
-    try:
-        st.session_state.result = convert(url.strip(), choice)
-    except Exception as e:
-        st.error(f"La conversión falló: {e}")
+        if not results and not mi_failed:
+            st.info("No hay sonidos con ese nombre. Prueba con otra palabra o pega el enlace del sonido.")
 
-if st.session_state.result:
-    r = st.session_state.result
-    st.success(f"{r['name']}  ({len(r['data']) / (1024 * 1024):.1f} MB)")
-    st.download_button("Descargar archivo", data=r["data"], file_name=r["name"], mime=r["mime"])
+        for i, snd in enumerate(results):
+            ext = mi_fmt.lower()
+            sid = re.sub(r"[^a-zA-Z0-9]+", "_", snd["slug"])[-60:] + f"_{i}"
+            ready_key = f"{snd['sound']}|{ext}"
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([3, 4, 2.3], vertical_alignment="center")
+                c1.markdown(f'<div class="ac-sound">{html.escape(snd["name"])}</div>', unsafe_allow_html=True)
+                c2.audio(snd["sound"], format="audio/mpeg")
+                with c3:
+                    ready = st.session_state.sounds.get(ready_key)
+                    if ready:
+                        st.download_button(f"Guardar {mi_fmt}", data=ready, key=f"mi_dl_{sid}",
+                                           file_name=f"{safe_filename(snd['name'])}.{ext}",
+                                           mime="audio/mpeg" if ext == "mp3" else "audio/wav")
+                    elif st.button("Preparar", key=f"mi_prep_{sid}"):
+                        try:
+                            data = fetch_bytes(snd["sound"])
+                            if ext == "wav":
+                                data = mp3_to_wav(data)
+                            st.session_state.sounds[ready_key] = data
+                            st.rerun()
+                        except Exception as e:
+                            show_error(e, "No se pudo descargar el sonido.")
 
 st.markdown('<p class="ac-foot">Anghell Convert. Descarga solo contenido propio o con permiso.</p>',
             unsafe_allow_html=True)
@@ -601,9 +899,9 @@ void main(){
   float t = uTime;
 
   float L = mix(uLevel, 1.32, uBurst);
-  float amp = (0.010 + 0.040 * uBurst) * smoothstep(0.0, 0.05, L);
-  float wave = sin(p.x * 5.0 + t * 0.9) * 0.6 + sin(p.x * 11.0 - t * 1.3) * 0.25
-             + (fbm(vec2(p.x * 2.5, t * 0.25)) - 0.5) * 1.6;
+  float amp = (0.016 + 0.040 * uBurst) * smoothstep(0.0, 0.05, L);
+  float wave = sin(p.x * 5.0 + t * 1.4) * 0.6 + sin(p.x * 11.0 - t * 2.1) * 0.25
+             + (fbm(vec2(p.x * 2.5 - t * 0.2, t * 0.45)) - 0.5) * 1.6;
   float surf = L + amp * wave;
   float dy = uv.y - surf;
   float on = smoothstep(0.0, 0.04, L);
@@ -635,14 +933,14 @@ void main(){
     for (int i = 0; i < 3; i++){
       float fi = float(i);
       float sc = 16.0 + fi * 10.0;
-      vec2 q = vec2(p.x * sc + fi * 7.0, (dy - t * (0.035 + 0.02 * fi)) * sc);
+      vec2 q = vec2(p.x * sc + fi * 7.0, (dy - t * (0.06 + 0.03 * fi)) * sc);
       vec2 id = floor(q); vec2 f = fract(q) - 0.5;
       float rnd = hash(id + fi * 13.1);
-      if (rnd > 0.88 - 0.08 * uBurst){
+      if (rnd > 0.84 - 0.08 * uBurst){
         vec2 o = (hash2(id) - 0.5) * 0.6;
         o.x += 0.25 * sin(t * 1.7 + rnd * 40.0);
         float d = length(f - o);
-        float life = 1.0 - smoothstep(0.0, 0.28 + 0.3 * uBurst, dy);
+        float life = 1.0 - smoothstep(0.0, 0.34 + 0.3 * uBurst, dy);
         emb += (1.0 - smoothstep(0.0, 0.11, d)) * life * (0.6 + 0.4 * sin(t * 7.0 + rnd * 60.0));
       }
     }
@@ -653,22 +951,22 @@ void main(){
   } else {
     /* ---- Lava: flujo con distorsión, costra y grietas incandescentes ---- */
     float depth = -dy;
-    vec2 lp = p * 3.0 + vec2(t * 0.035, -t * 0.012);
-    vec2 w = vec2(fbm(lp + t * 0.05), fbm(lp + vec2(5.2, 1.3) - t * 0.04));
+    vec2 lp = p * 3.0 + vec2(t * 0.075, -t * 0.025);
+    vec2 w = vec2(fbm(lp + t * 0.11), fbm(lp + vec2(5.2, 1.3) - t * 0.09));
     float n = fbm(lp + 2.2 * w);
-    vec2 v = voronoi(lp * 1.7 + w * 1.4, t * 0.18);
+    vec2 v = voronoi(lp * 1.7 + w * 1.4, t * 0.35);
     float edge = v.y - v.x;
     float cracks = 1.0 - smoothstep(0.0, 0.10 + 0.08 * n, edge);
     float crust = smoothstep(0.38, 0.72, n) * (1.0 - cracks);
     float h = 0.52 + 0.5 * cracks + 0.3 * (n - 0.5) - 0.6 * crust;
-    h += 0.07 * sin(t * 1.3 + n * 14.0);
+    h += 0.09 * sin(t * 2.2 + n * 14.0);
     h -= depth * 0.22;
     col = lavaRamp(h);
 
     float rim = exp(-depth * 55.0);
     col = mix(col, vec3(1.0, 0.78, 0.35), rim * 0.75);
 
-    vec2 bq = vec2(p.x * 8.0, (uv.y - t * 0.03) * 8.0);
+    vec2 bq = vec2(p.x * 8.0, (uv.y - t * 0.06) * 8.0);
     vec2 bid = floor(bq); vec2 bf = fract(bq) - 0.5;
     float br = hash(bid);
     if (br > 0.82){
@@ -722,7 +1020,7 @@ void main(){
           uTheme = U('uTheme'), uBurst = U('uBurst');
 
     // Calidad adaptativa: baja la resolución interna si el equipo va lento
-    let Q = innerWidth < 700 ? 0.5 : 0.62, slow = 0, last = 0;
+    let Q = innerWidth < 700 ? 0.55 : 0.75, slow = 0, last = 0;
     function resize() {
       const w = Math.max(2, Math.round(innerWidth * Q)), h = Math.max(2, Math.round(innerHeight * Q));
       if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; gl.viewport(0, 0, w, h); }
@@ -788,9 +1086,21 @@ void main(){
 })();
 """
 
-BOOT = (
-    '<script type="text/plain" id="ac-engine">' + ENGINE_JS + "</script>"
-    """
+import inspect
+
+if "unsafe_allow_javascript" in inspect.signature(st.html).parameters:
+    # Streamlit reciente: el script corre directo en la página, sin iframe
+    st.html(
+        '<div class="ac-engine-host"></div><script>'
+        "if (!window.__anghellEngine) { window.__anghellEngine = true;" + ENGINE_JS + "}"
+        "</script>",
+        unsafe_allow_javascript=True,
+    )
+else:
+    # Versiones anteriores: se inyecta desde un componente invisible
+    BOOT = (
+        '<script type="text/plain" id="ac-engine">' + ENGINE_JS + "</script>"
+        """
 <script>
 (function () {
   try {
@@ -804,5 +1114,5 @@ BOOT = (
 })();
 </script>
 """
-)
-components.html(BOOT, height=0)
+    )
+    components.html(BOOT, height=0)
