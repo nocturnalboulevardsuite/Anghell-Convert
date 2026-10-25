@@ -461,6 +461,10 @@ div[role="radiogroup"] > div:nth-child(2) [data-testid="stRadioOption"]::before 
   font-size: .9rem; margin: -.3rem 14px .8rem; }
 .ac-trim-times b { color: var(--text); font-variant-numeric: tabular-nums; }
 [data-testid="stToggle"] p { color: var(--text) !important; }
+.ac-help { color: var(--muted); font-size: .9rem; line-height: 1.5; margin-bottom: .6rem; }
+.ac-help b { color: var(--text); }
+[data-baseweb="select"] > div { background: var(--input) !important; border-color: var(--border) !important;
+  border-radius: 12px !important; color: var(--text) !important; }
 [data-testid="stVideo"] video, video { border-radius: 14px; border: 1px solid var(--border); max-height: 380px; background: #000; }
 
 .ac-foot { color: var(--muted) !important; font-size: .8rem; text-align: center; margin-top: 2.2rem; }
@@ -532,8 +536,12 @@ def explain_error(err: Exception) -> str:
     if isinstance(err, requests.exceptions.RequestException):
         return "No hubo respuesta del sitio. Revisa tu conexión a internet e inténtalo de nuevo."
     if "sign in to confirm" in low or "not a bot" in low:
-        return ("YouTube bloqueó la descarga desde este servidor con su verificación anti-bot. "
-                "Sube tu archivo de cookies de YouTube en Opciones avanzadas o ejecuta la app en tu computador.")
+        if ON_CLOUD:
+            return ("YouTube bloqueó al servidor con su verificación anti-bot. Sube un archivo cookies.txt "
+                    "en Opciones avanzadas o ejecuta la app en tu computador.")
+        return ("YouTube pidió verificar que no eres un bot y no encontré una sesión de YouTube en tus "
+                "navegadores. Inicia sesión en youtube.com con Firefox (o cierra Chrome/Edge si lo usas) "
+                "y vuelve a convertir, o sube un archivo cookies.txt en Opciones avanzadas.")
     if "javascript" in low or "challenge" in low or "js runtime" in low or "ejs" in low:
         return ("Falta el motor de JavaScript que YouTube ahora exige. Reinstala las dependencias con "
                 "pip install -r requirements.txt (incluye deno y yt-dlp-ejs).")
@@ -556,7 +564,10 @@ def explain_error(err: Exception) -> str:
 def show_error(err: Exception, prefix: str = ""):
     st.error((prefix + " " if prefix else "") + explain_error(err))
     with st.expander("Detalle técnico"):
-        st.code(str(err)[:3000], language=None)
+        if "wrap_lines" in inspect.signature(st.code).parameters:
+            st.code(str(err)[:3000], language=None, wrap_lines=True)
+        else:
+            st.code(str(err)[:3000], language=None)
 
 
 # ════════════════════════════ YouTube ════════════════════════════
@@ -567,7 +578,14 @@ RETRYABLE = ("403", "forbidden", "requested format is not available", "fragment"
              "po token", "unable to download video data")
 
 
-def base_opts(cookiefile=None, clients=None) -> dict:
+BROWSERS = ["firefox", "edge", "chrome", "brave", "opera", "vivaldi", "chromium", "safari"]
+BROWSER_LABELS = {"Automático": "auto", "No usar": None, "Firefox": "firefox", "Edge": "edge",
+                  "Chrome": "chrome", "Brave": "brave", "Opera": "opera", "Vivaldi": "vivaldi", "Safari": "safari"}
+# En Streamlit Community Cloud el código vive en /mount/src: ahí no hay navegador del que leer cookies
+ON_CLOUD = os.path.exists("/mount/src") or bool(os.environ.get("STREAMLIT_SHARING_MODE"))
+
+
+def base_opts(auth=None, clients=None) -> dict:
     opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
             "retries": 5, "fragment_retries": 5, "concurrent_fragment_downloads": 1,
             "http_chunk_size": 10 * 1024 * 1024}
@@ -575,11 +593,16 @@ def base_opts(cookiefile=None, clients=None) -> dict:
         opts["ffmpeg_location"] = FFMPEG
     if JS_RUNTIME:
         opts["js_runtimes"] = JS_RUNTIME
-    if cookiefile:
-        opts["cookiefile"] = cookiefile
+    if auth:
+        opts.update(auth)
     if clients:
         opts["extractor_args"] = {"youtube": {"player_client": clients}}
     return opts
+
+
+def is_bot_check(err: Exception) -> bool:
+    low = str(err).lower()
+    return "sign in to confirm" in low or "not a bot" in low or "cookies for the authentication" in low
 
 
 def is_retryable(err: Exception) -> bool:
@@ -587,20 +610,58 @@ def is_retryable(err: Exception) -> bool:
     return any(k in low for k in RETRYABLE)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def get_info(url: str, cookiefile=None) -> dict:
-    last = None
-    for clients in PLAYER_CLIENTS:
-        try:
-            with yt_dlp.YoutubeDL({**base_opts(cookiefile, clients), "skip_download": True}) as ydl:
-                info = ydl.extract_info(url, download=False)
-            break
-        except yt_dlp.utils.DownloadError as e:
-            last = e
-            if not is_retryable(e):
+def auth_sources(cookiefile, browser):
+    """Orden de identificación: archivo cookies.txt, navegador elegido, y luego (si hay
+    verificación anti-bot y está en Automático) cada navegador instalado."""
+    first = []
+    if cookiefile:
+        first.append(("archivo cookies.txt", {"cookiefile": cookiefile}))
+    if browser and browser != "auto":
+        first.append((browser, {"cookiesfrombrowser": (browser,)}))
+    if not first:
+        first.append(("sin cookies", {}))
+    fallback = []
+    if browser == "auto" and not ON_CLOUD:
+        fallback = [(b, {"cookiesfrombrowser": (b,)}) for b in BROWSERS]
+    return first, fallback
+
+
+def run_youtube(task, cookiefile, browser, on_attempt=None):
+    """Ejecuta task(auth, clients) probando clientes de YouTube y, si aparece la
+    verificación anti-bot, las cookies de los navegadores del equipo."""
+    first, fallback = auth_sources(cookiefile, browser)
+    last, bot_seen, n = None, False, 0
+    for idx, (name, auth) in enumerate(first + fallback):
+        if idx >= len(first) and not bot_seen:
+            break                         # los navegadores solo se usan ante la verificación anti-bot
+        clients_list = PLAYER_CLIENTS if not auth.get("cookiesfrombrowser") else [None, ["tv"], ["web_embedded"]]
+        for clients in clients_list:
+            n += 1
+            if on_attempt:
+                on_attempt(n, name)
+            try:
+                return task(auth, clients)
+            except yt_dlp.utils.DownloadError as e:
+                last = e
+                low = str(e).lower()
+                if auth.get("cookiesfrombrowser") and ("cookie" in low or "decrypt" in low or "keyring" in low
+                                                        or "permission" in low or "database" in low):
+                    break                 # no se pudo leer ese navegador: probar el siguiente
+                if is_bot_check(e):
+                    bot_seen = True
+                    continue              # algunos clientes no piden verificación
+                if is_retryable(e):
+                    continue
                 raise
-    else:
-        raise last
+    raise last or RuntimeError("Error desconocido.")
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_info(url: str, cookiefile=None, browser="auto") -> dict:
+    def task(auth, clients):
+        with yt_dlp.YoutubeDL({**base_opts(auth, clients), "skip_download": True}) as ydl:
+            return ydl.extract_info(url, download=False)
+    info = run_youtube(task, cookiefile, browser)
     heights = sorted({f.get("height") for f in info.get("formats") or [] if f.get("height")})
     return {
         "title": info.get("title") or "Sin título",
@@ -629,7 +690,7 @@ def format_candidates(choice: str):
     ]
 
 
-def convert(url: str, choice: str, cookiefile=None):
+def convert(url: str, choice: str, cookiefile=None, browser="auto"):
     cfg = FORMATS[choice]
     bar = st.progress(0, text="Preparando")
     state = {"label": ""}
@@ -643,14 +704,17 @@ def convert(url: str, choice: str, cookiefile=None):
         elif d["status"] == "finished":
             bar.progress(1.0, text="Convirtiendo con FFmpeg")
 
-    last_err = None
-    # Si YouTube responde 403 con un cliente, se prueba el siguiente
-    for attempt, clients in enumerate(PLAYER_CLIENTS):
-        state["label"] = f" (intento {attempt + 1})" if attempt else ""
+    def on_attempt(n, name):
+        state["label"] = f" (intento {n}, {name})" if n > 1 else ""
+        if n > 1:
+            bar.progress(0, text=f"Reintentando{state['label']}")
+
+    def task(auth, clients):
+        last = None
         for fmt in format_candidates(choice):
             outdir = tempfile.mkdtemp(prefix="anghell_")
             try:
-                opts = {**base_opts(cookiefile, clients),
+                opts = {**base_opts(auth, clients),
                         "outtmpl": os.path.join(outdir, "%(title).90s.%(ext)s"),
                         "progress_hooks": [hook], "format": fmt}
                 if cfg["kind"] == "audio":
@@ -661,31 +725,30 @@ def convert(url: str, choice: str, cookiefile=None):
                 else:
                     opts["merge_output_format"] = "mp4"
                     opts["postprocessors"] = [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}]
-
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     ydl.download([url])
-
                 files = [f for f in os.listdir(outdir) if f.lower().endswith("." + cfg["ext"])]
                 if not files:
                     raise RuntimeError("FFmpeg no generó el archivo final.")
                 path = max((os.path.join(outdir, f) for f in files), key=os.path.getsize)
                 with open(path, "rb") as fh:
-                    data = fh.read()
-                bar.progress(1.0, text="Listo")
-                return {"name": os.path.basename(path), "data": data, "mime": cfg["mime"]}
+                    return {"name": os.path.basename(path), "data": fh.read(), "mime": cfg["mime"]}
             except yt_dlp.utils.DownloadError as e:
-                last_err = e
-                low = str(e).lower()
-                if "requested format is not available" in low:
-                    continue          # probar el siguiente formato con el mismo cliente
-                if is_retryable(e):
-                    break             # 403: pasar al siguiente cliente
-                bar.empty()
+                last = e
+                if "requested format is not available" in str(e).lower():
+                    continue
                 raise
             finally:
                 shutil.rmtree(outdir, ignore_errors=True)
-    bar.empty()
-    raise last_err or RuntimeError("Error desconocido.")
+        raise last
+
+    try:
+        result = run_youtube(task, cookiefile, browser, on_attempt)
+        bar.progress(1.0, text="Listo")
+        return result
+    except Exception:
+        bar.empty()
+        raise
 
 
 def update_ytdlp() -> str:
@@ -991,9 +1054,21 @@ with tab_yt:
                         placeholder="https://youtube.com/watch?v=...  o  https://youtube.com/shorts/...")
 
     with st.expander("Opciones avanzadas"):
-        st.caption("Si YouTube pide verificar que no eres un bot, exporta tus cookies de YouTube "
-                   "en formato cookies.txt con una extensión del navegador y súbelas aquí.")
-        cookie_up = st.file_uploader("Archivo cookies.txt", type=["txt"], key="cookies")
+        st.markdown(
+            '<div class="ac-help"><b>Si YouTube pide verificar que no eres un bot</b>, la app usa la sesión '
+            'de YouTube de tu navegador. Abre youtube.com en ese navegador e inicia sesión una vez. '
+            'En Chrome y Edge cierra el navegador antes de convertir, porque bloquean sus cookies '
+            'mientras están abiertos; con Firefox no hace falta.</div>', unsafe_allow_html=True)
+        if ON_CLOUD:
+            st.warning("La app está en un servidor en la nube: ahí no hay navegador del que tomar la sesión. "
+                       "Sube un archivo cookies.txt o ejecuta la app en tu computador.")
+        browser_label = st.selectbox("Sesión del navegador", list(BROWSER_LABELS.keys()), index=0,
+                                     key="browser", disabled=ON_CLOUD,
+                                     help="Automático prueba Firefox, Edge, Chrome, Brave, Opera, Vivaldi y Safari "
+                                          "solo si YouTube pide la verificación.")
+        cookie_up = st.file_uploader("O sube un archivo cookies.txt", type=["txt"], key="cookies",
+                                     help="Expórtalo con la extensión «Get cookies.txt LOCALLY» desde una "
+                                          "pestaña de youtube.com con tu sesión iniciada.")
         st.caption(f"Motor de descarga: yt-dlp {yt_dlp.version.__version__}. "
                    "Si YouTube devuelve error 403, actualízalo y reinicia la app.")
         if st.button("Actualizar yt-dlp", key="upd_ytdlp"):
@@ -1003,6 +1078,7 @@ with tab_yt:
                 st.success(f"yt-dlp actualizado a {ver}. Reinicia la app (Ctrl+C y streamlit run app.py) para usarlo.")
             except Exception as e:
                 show_error(e, "No se pudo actualizar.")
+    browser = None if ON_CLOUD else BROWSER_LABELS[browser_label]
     cookiefile = None
     if cookie_up is not None:
         cookiefile = os.path.join(tempfile.gettempdir(), f"anghell_cookies_{abs(hash(cookie_up.name))}.txt")
@@ -1016,7 +1092,7 @@ with tab_yt:
         else:
             try:
                 with st.spinner("Leyendo el video"):
-                    info = get_info(url.strip(), cookiefile)
+                    info = get_info(url.strip(), cookiefile, browser)
                 thumb = (f'<img src="{html.escape(info["thumbnail"])}" alt="Miniatura del video">'
                          if info["thumbnail"] else "")
                 st.markdown(
@@ -1043,7 +1119,7 @@ with tab_yt:
         st.session_state.trimmed = None
         st.session_state.show_trim = False
         try:
-            st.session_state.result = convert(url.strip(), choice, cookiefile)
+            st.session_state.result = convert(url.strip(), choice, cookiefile, browser)
         except Exception as e:
             show_error(e, "La conversión falló.")
 
