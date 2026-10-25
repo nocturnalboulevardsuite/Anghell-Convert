@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from urllib.parse import quote
 
@@ -42,7 +43,7 @@ def make_page_icon() -> Image.Image:
 
 st.set_page_config(page_title="Anghell Convert", page_icon=make_page_icon(), layout="centered")
 
-for k, v in {"result": None, "sounds": {}, "trimmed": None}.items():
+for k, v in {"result": None, "sounds": {}, "trimmed": None, "show_trim": False}.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -121,6 +122,8 @@ ICONS = {
                               "<path d='M15.5 9a4 4 0 0 1 0 6'/><path d='M18.5 6.5a7.5 7.5 0 0 1 0 11'/>"),
     "__I_CONVERT__": icon_uri("<path d='M4 12a8 8 0 0 1 13.7-5.6L20 8.5'/><path d='M20 4v4.5h-4.5'/>"
                               "<path d='M20 12a8 8 0 0 1-13.7 5.6L4 15.5'/><path d='M4 20v-4.5h4.5'/>"),
+    "__I_SCISSORS__": icon_uri("<circle cx='6' cy='6' r='3'/><circle cx='6' cy='18' r='3'/>"
+                               "<path d='M8.1 8.1L20 20M8.1 15.9L20 4'/>"),
     "__I_DOWNLOAD__": icon_uri("<path d='M12 4v11'/><path d='M7 10.5l5 5 5-5'/><path d='M5 20h14'/>"),
 }
 
@@ -388,6 +391,8 @@ div[role="radiogroup"] > div:nth-child(2) [data-testid="stRadioOption"]::before 
 .stButton > button::before, .stDownloadButton > button::before {
   content: ""; width: 18px; height: 18px; margin-right: .55rem; flex-shrink: 0; background: #fff;
   -webkit-mask: __I_CONVERT__ center / contain no-repeat; mask: __I_CONVERT__ center / contain no-repeat; }
+[class*="st-key-toggle_trim"] button::before, [class*="st-key-cut_"] button::before {
+  -webkit-mask-image: __I_SCISSORS__; mask-image: __I_SCISSORS__; }
 .stDownloadButton > button::before, [class*="st-key-mi_prep_"] button::before {
   -webkit-mask-image: __I_DOWNLOAD__; mask-image: __I_DOWNLOAD__; }
 .stButton > button:hover, .stDownloadButton > button:hover {
@@ -440,7 +445,8 @@ div[role="radiogroup"] > div:nth-child(2) [data-testid="stRadioOption"]::before 
   color: var(--text); margin: 1.4rem 0 .2rem; }
 .ac-wave { background: var(--input); border: 1px solid var(--border); border-radius: 16px;
   padding: 10px 14px; margin-bottom: -.4rem; }
-.ac-wave svg { width: 100%; height: 120px; display: block; }
+.ac-wave svg { width: 100%; display: block; }
+.ac-wave .wf-shade { fill: rgba(0, 0, 0, .62); }
 .ac-wave .wf-off { fill: var(--muted); opacity: .28; }
 .ac-wave .wf-on { fill: url(#wfLava); }
 .ac-wave .wf-region { fill: rgba(255, 90, 0, .10); stroke: #ff5a00; stroke-width: 2; }
@@ -455,6 +461,7 @@ div[role="radiogroup"] > div:nth-child(2) [data-testid="stRadioOption"]::before 
   font-size: .9rem; margin: -.3rem 14px .8rem; }
 .ac-trim-times b { color: var(--text); font-variant-numeric: tabular-nums; }
 [data-testid="stToggle"] p { color: var(--text) !important; }
+[data-testid="stVideo"] video, video { border-radius: 14px; border: 1px solid var(--border); max-height: 380px; background: #000; }
 
 .ac-foot { color: var(--muted) !important; font-size: .8rem; text-align: center; margin-top: 2.2rem; }
 
@@ -539,7 +546,8 @@ def explain_error(err: Exception) -> str:
     if "age" in low and ("confirm" in low or "restricted" in low):
         return "El video tiene restricción de edad. Sube tus cookies de YouTube en Opciones avanzadas."
     if "http error 403" in low or "forbidden" in low:
-        return "YouTube rechazó la descarga (403). Actualiza yt-dlp con pip install -U \"yt-dlp[default]\"."
+        return ("YouTube rechazó la descarga (403) con todos los métodos probados. Abre Opciones avanzadas, "
+                "presiona Actualizar yt-dlp y reinicia la app. Si sigue, sube tus cookies de YouTube.")
     if "unavailable" in low:
         return "El video no está disponible en esta región o fue eliminado."
     return "No se pudo completar la operación."
@@ -552,22 +560,47 @@ def show_error(err: Exception, prefix: str = ""):
 
 
 # ════════════════════════════ YouTube ════════════════════════════
-def base_opts(cookiefile=None) -> dict:
+# Clientes de YouTube que se prueban en orden si la descarga devuelve 403.
+# None = configuración por defecto de yt-dlp.
+PLAYER_CLIENTS = [None, ["android"], ["web_embedded"], ["visionos", "web_embedded", "mweb"], ["tv"]]
+RETRYABLE = ("403", "forbidden", "requested format is not available", "fragment", "not available on this app",
+             "po token", "unable to download video data")
+
+
+def base_opts(cookiefile=None, clients=None) -> dict:
     opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
-            "retries": 3, "fragment_retries": 3, "concurrent_fragment_downloads": 4}
+            "retries": 5, "fragment_retries": 5, "concurrent_fragment_downloads": 1,
+            "http_chunk_size": 10 * 1024 * 1024}
     if FFMPEG:
         opts["ffmpeg_location"] = FFMPEG
     if JS_RUNTIME:
         opts["js_runtimes"] = JS_RUNTIME
     if cookiefile:
         opts["cookiefile"] = cookiefile
+    if clients:
+        opts["extractor_args"] = {"youtube": {"player_client": clients}}
     return opts
+
+
+def is_retryable(err: Exception) -> bool:
+    low = str(err).lower()
+    return any(k in low for k in RETRYABLE)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_info(url: str, cookiefile=None) -> dict:
-    with yt_dlp.YoutubeDL({**base_opts(cookiefile), "skip_download": True}) as ydl:
-        info = ydl.extract_info(url, download=False)
+    last = None
+    for clients in PLAYER_CLIENTS:
+        try:
+            with yt_dlp.YoutubeDL({**base_opts(cookiefile, clients), "skip_download": True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+            break
+        except yt_dlp.utils.DownloadError as e:
+            last = e
+            if not is_retryable(e):
+                raise
+    else:
+        raise last
     heights = sorted({f.get("height") for f in info.get("formats") or [] if f.get("height")})
     return {
         "title": info.get("title") or "Sin título",
@@ -599,97 +632,157 @@ def format_candidates(choice: str):
 def convert(url: str, choice: str, cookiefile=None):
     cfg = FORMATS[choice]
     bar = st.progress(0, text="Preparando")
+    state = {"label": ""}
 
     def hook(d):
         if d["status"] == "downloading":
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             done = d.get("downloaded_bytes", 0)
             pct = min(done / total, 1.0) if total else 0
-            bar.progress(pct, text=f"Descargando {pct * 100:.0f}%")
+            bar.progress(pct, text=f"Descargando {pct * 100:.0f}%{state['label']}")
         elif d["status"] == "finished":
             bar.progress(1.0, text="Convirtiendo con FFmpeg")
 
     last_err = None
-    for fmt in format_candidates(choice):
-        outdir = tempfile.mkdtemp(prefix="anghell_")
-        try:
-            opts = {**base_opts(cookiefile),
-                    "outtmpl": os.path.join(outdir, "%(title).90s.%(ext)s"),
-                    "progress_hooks": [hook], "format": fmt}
-            if cfg["kind"] == "audio":
-                pp = {"key": "FFmpegExtractAudio", "preferredcodec": cfg["ext"]}
-                if cfg["ext"] == "mp3":
-                    pp["preferredquality"] = "320"
-                opts["postprocessors"] = [pp]
-            else:
-                opts["merge_output_format"] = "mp4"
-                opts["postprocessors"] = [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}]
+    # Si YouTube responde 403 con un cliente, se prueba el siguiente
+    for attempt, clients in enumerate(PLAYER_CLIENTS):
+        state["label"] = f" (intento {attempt + 1})" if attempt else ""
+        for fmt in format_candidates(choice):
+            outdir = tempfile.mkdtemp(prefix="anghell_")
+            try:
+                opts = {**base_opts(cookiefile, clients),
+                        "outtmpl": os.path.join(outdir, "%(title).90s.%(ext)s"),
+                        "progress_hooks": [hook], "format": fmt}
+                if cfg["kind"] == "audio":
+                    pp = {"key": "FFmpegExtractAudio", "preferredcodec": cfg["ext"]}
+                    if cfg["ext"] == "mp3":
+                        pp["preferredquality"] = "320"
+                    opts["postprocessors"] = [pp]
+                else:
+                    opts["merge_output_format"] = "mp4"
+                    opts["postprocessors"] = [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}]
 
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([url])
 
-            files = [f for f in os.listdir(outdir) if f.lower().endswith("." + cfg["ext"])]
-            if not files:
-                raise RuntimeError("FFmpeg no generó el archivo final.")
-            path = max((os.path.join(outdir, f) for f in files), key=os.path.getsize)
-            with open(path, "rb") as fh:
-                data = fh.read()
-            bar.progress(1.0, text="Listo")
-            return {"name": os.path.basename(path), "data": data, "mime": cfg["mime"]}
-        except yt_dlp.utils.DownloadError as e:
-            last_err = e
-            if "requested format is not available" not in str(e).lower():
-                break
-        finally:
-            shutil.rmtree(outdir, ignore_errors=True)
+                files = [f for f in os.listdir(outdir) if f.lower().endswith("." + cfg["ext"])]
+                if not files:
+                    raise RuntimeError("FFmpeg no generó el archivo final.")
+                path = max((os.path.join(outdir, f) for f in files), key=os.path.getsize)
+                with open(path, "rb") as fh:
+                    data = fh.read()
+                bar.progress(1.0, text="Listo")
+                return {"name": os.path.basename(path), "data": data, "mime": cfg["mime"]}
+            except yt_dlp.utils.DownloadError as e:
+                last_err = e
+                low = str(e).lower()
+                if "requested format is not available" in low:
+                    continue          # probar el siguiente formato con el mismo cliente
+                if is_retryable(e):
+                    break             # 403: pasar al siguiente cliente
+                bar.empty()
+                raise
+            finally:
+                shutil.rmtree(outdir, ignore_errors=True)
     bar.empty()
     raise last_err or RuntimeError("Error desconocido.")
 
 
+def update_ytdlp() -> str:
+    proc = subprocess.run([sys.executable, "-m", "pip", "install", "-U", "yt-dlp[default]"],
+                          capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr[-1500:] or "pip falló")
+    out = subprocess.run([sys.executable, "-c", "import yt_dlp;print(yt_dlp.version.__version__)"],
+                         capture_output=True, text=True)
+    return out.stdout.strip()
+
+
 # ════════════════════════════ Editor de recorte (estilo Discord) ════════════════════════════
+def _write_temp(d: str, data: bytes, ext: str) -> str:
+    path = os.path.join(d, "in." + ext)
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return path
+
+
+@st.cache_data(show_spinner=False, max_entries=6)
+def media_duration(data: bytes, ext: str) -> float:
+    with tempfile.TemporaryDirectory() as d:
+        src = _write_temp(d, data, ext)
+        proc = subprocess.run([FFMPEG, "-hide_banner", "-i", src], capture_output=True, text=True)
+    m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", proc.stderr)
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
+
+
 @st.cache_data(show_spinner=False, max_entries=6)
 def waveform_peaks(data: bytes, ext: str, bars: int = 160):
-    """Decodifica el audio a mono y devuelve picos normalizados + duración en segundos."""
+    """Decodifica el audio a mono y devuelve picos normalizados."""
     with tempfile.TemporaryDirectory() as d:
-        src = os.path.join(d, "in." + ext)
-        with open(src, "wb") as fh:
-            fh.write(data)
-        proc = subprocess.run([FFMPEG, "-v", "error", "-i", src, "-ac", "1", "-ar", "8000",
-                               "-f", "s16le", "pipe:1"], capture_output=True, check=True)
+        src = _write_temp(d, data, ext)
+        proc = subprocess.run([FFMPEG, "-v", "error", "-i", src, "-vn", "-ac", "1", "-ar", "8000",
+                               "-f", "s16le", "pipe:1"], capture_output=True)
     samples = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
-    duration = len(samples) / 8000.0
     if len(samples) == 0:
-        return [0.0] * bars, 0.0
+        return [0.04] * bars
     chunks = np.array_split(np.abs(samples), bars)
     peaks = np.array([float(np.sqrt(np.mean(c ** 2))) if len(c) else 0.0 for c in chunks])
     peaks = peaks / (peaks.max() or 1.0)
-    return [round(float(p), 3) for p in np.clip(peaks ** 0.75, 0.04, 1.0)], duration
+    return [round(float(p), 3) for p in np.clip(peaks ** 0.75, 0.04, 1.0)]
 
 
-def waveform_svg(peaks, start: float, end: float, duration: float) -> str:
-    n, W, H = len(peaks), 1000, 120
+@st.cache_data(show_spinner=False, max_entries=6)
+def filmstrip(data: bytes, ext: str, duration: float, frames: int = 12) -> str:
+    """Tira de miniaturas del video (una imagen JPG en base64)."""
+    import base64
+    with tempfile.TemporaryDirectory() as d:
+        src = _write_temp(d, data, ext)
+        out = os.path.join(d, "strip.jpg")
+        fps = frames / max(duration, 0.5)
+        subprocess.run([FFMPEG, "-v", "error", "-i", src, "-vf",
+                        f"fps={fps:.5f},scale=176:99:force_original_aspect_ratio=increase,crop=176:99,tile={frames}x1",
+                        "-frames:v", "1", "-q:v", "5", out], capture_output=True)
+        if not os.path.exists(out):
+            return ""
+        with open(out, "rb") as fh:
+            return "data:image/jpeg;base64," + base64.b64encode(fh.read()).decode()
+
+
+def timeline_svg(peaks, start: float, end: float, duration: float, strip: str = "") -> str:
+    """Línea de tiempo: miniaturas del video (si hay) + forma de onda + selección con manijas."""
+    W = 1000
+    strip_h = 84 if strip else 0
+    wave_h = 70 if strip else 120
+    H = strip_h + wave_h + (8 if strip else 0)
+    n = len(peaks)
     bw = W / n
     s_frac, e_frac = (start / duration, end / duration) if duration else (0, 1)
-    bars = []
-    for i, p in enumerate(peaks):
-        h = max(4, p * (H - 24))
-        x, y = i * bw + bw * 0.18, (H - h) / 2
-        inside = s_frac <= (i + 0.5) / n <= e_frac
-        bars.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw * 0.64:.1f}" height="{h:.1f}" rx="{bw * 0.32:.1f}" '
-                    f'class="{"wf-on" if inside else "wf-off"}"/>')
     sx, ex = s_frac * W, e_frac * W
+    parts = []
+    if strip:
+        parts.append(f'<image href="{strip}" x="0" y="0" width="{W}" height="{strip_h}" preserveAspectRatio="none"/>')
+        parts.append(f'<rect x="0" y="0" width="{sx:.1f}" height="{strip_h}" class="wf-shade"/>')
+        parts.append(f'<rect x="{ex:.1f}" y="0" width="{W - ex:.1f}" height="{strip_h}" class="wf-shade"/>')
+    y0 = strip_h + (8 if strip else 0)
+    for i, p in enumerate(peaks):
+        h = max(4, p * (wave_h - 16))
+        x, y = i * bw + bw * 0.18, y0 + (wave_h - h) / 2
+        inside = s_frac <= (i + 0.5) / n <= e_frac
+        parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw * 0.64:.1f}" height="{h:.1f}" '
+                     f'rx="{bw * 0.32:.1f}" class="{"wf-on" if inside else "wf-off"}"/>')
+    region = (f'<rect x="{sx:.1f}" y="1.5" width="{max(ex - sx, 0):.1f}" height="{H - 3}" rx="10" class="wf-region"/>'
+              f'<rect x="{sx - 5:.1f}" y="0" width="10" height="{H}" rx="5" class="wf-handle"/>'
+              f'<rect x="{ex - 5:.1f}" y="0" width="10" height="{H}" rx="5" class="wf-handle"/>'
+              f'<rect x="{sx - 1.5:.1f}" y="{H / 2 - 14}" width="3" height="28" rx="1.5" class="wf-grip"/>'
+              f'<rect x="{ex - 1.5:.1f}" y="{H / 2 - 14}" width="3" height="28" rx="1.5" class="wf-grip"/>')
     return f"""
 <div class="ac-wave">
-  <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" role="img" aria-label="Forma de onda del audio">
+  <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" style="height:{H}px" role="img"
+       aria-label="Línea de tiempo para recortar">
     <defs><linearGradient id="wfLava" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#ffd36a"/><stop offset="50%" stop-color="#ff5a00"/>
       <stop offset="100%" stop-color="#c41a00"/></linearGradient></defs>
-    <rect x="{sx:.1f}" y="2" width="{max(ex - sx, 0):.1f}" height="{H - 4}" rx="10" class="wf-region"/>
-    {''.join(bars)}
-    <rect x="{sx - 5:.1f}" y="0" width="10" height="{H}" rx="5" class="wf-handle"/>
-    <rect x="{ex - 5:.1f}" y="0" width="10" height="{H}" rx="5" class="wf-handle"/>
-    <rect x="{sx - 1.5:.1f}" y="{H / 2 - 14}" width="3" height="28" rx="1.5" class="wf-grip"/>
-    <rect x="{ex - 1.5:.1f}" y="{H / 2 - 14}" width="3" height="28" rx="1.5" class="wf-grip"/>
+    {''.join(parts)}{region}
   </svg>
 </div>"""
 
@@ -699,56 +792,79 @@ def fmt_time(sec: float) -> str:
     return f"{int(m)}:{s:04.1f}"
 
 
-def trim_audio(data: bytes, ext: str, start: float, end: float, fade: bool) -> bytes:
+def trim_media(data: bytes, ext: str, start: float, end: float, fade: bool) -> bytes:
     with tempfile.TemporaryDirectory() as d:
-        src, dst = os.path.join(d, "in." + ext), os.path.join(d, "out." + ext)
-        with open(src, "wb") as fh:
-            fh.write(data)
+        src = _write_temp(d, data, ext)
+        dst = os.path.join(d, "out." + ext)
         length = max(end - start, 0.1)
         cmd = [FFMPEG, "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", src]
+        f = min(0.4, length / 4)
         if fade:
-            f = min(0.4, length / 4)
             cmd += ["-af", f"afade=t=in:st=0:d={f:.2f},afade=t=out:st={length - f:.3f}:d={f:.2f}"]
-        cmd += ["-c:a", "libmp3lame", "-b:a", "320k"] if ext == "mp3" else ["-c:a", "pcm_s16le"]
+        if ext == "mp4":
+            if fade:
+                cmd += ["-vf", f"fade=t=in:st=0:d={f:.2f},fade=t=out:st={length - f:.3f}:d={f:.2f}"]
+            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+        elif ext == "mp3":
+            cmd += ["-c:a", "libmp3lame", "-b:a", "320k"]
+        else:
+            cmd += ["-c:a", "pcm_s16le"]
         subprocess.run(cmd + [dst], check=True, capture_output=True)
         with open(dst, "rb") as fh:
             return fh.read()
 
 
-def audio_trimmer(result: dict):
+def media_trimmer(result: dict):
     ext = result["name"].rsplit(".", 1)[-1].lower()
+    is_video = ext == "mp4"
+    uid = hashlib.md5(result["name"].encode()).hexdigest()[:8]
     try:
-        peaks, duration = waveform_peaks(result["data"], ext)
+        with st.spinner("Preparando el editor"):
+            duration = media_duration(result["data"], ext)
+            peaks = waveform_peaks(result["data"], ext)
+            strip = filmstrip(result["data"], ext, duration) if is_video else ""
     except Exception as e:
-        show_error(e, "No se pudo leer el audio para recortarlo.")
+        show_error(e, "No se pudo abrir el archivo para recortarlo.")
         return
     if duration <= 0.2:
+        st.info("El archivo es demasiado corto para recortarlo.")
         return
-    uid = hashlib.md5(result["name"].encode()).hexdigest()[:8]
-    st.markdown('<div class="ac-trim-title">Recortar audio</div>', unsafe_allow_html=True)
+
+    st.markdown(f'<div class="ac-trim-title">{"Recortar video" if is_video else "Recortar audio"}</div>',
+                unsafe_allow_html=True)
+    preview_slot = st.empty()
     wave_slot = st.empty()
-    start, end = st.slider("Selección", 0.0, float(round(duration, 1)), (0.0, float(round(duration, 1))),
-                           step=0.1, key=f"trim_{uid}", label_visibility="collapsed", format="%.1f s")
+    top = float(round(duration, 1))
+    start, end = st.slider("Selección", 0.0, top, (0.0, top), step=0.1, key=f"trim_{uid}",
+                           label_visibility="collapsed", format="%.1f s")
     if end - start < 0.2:
         end = min(duration, start + 0.2)
-    wave_slot.markdown(waveform_svg(peaks, start, end, duration), unsafe_allow_html=True)
+    wave_slot.markdown(timeline_svg(peaks, start, end, duration, strip), unsafe_allow_html=True)
+    with preview_slot.container():
+        if is_video:
+            st.video(result["data"], start_time=float(start), end_time=float(end))
     st.markdown(
         f'<div class="ac-trim-times"><span>Inicio <b>{fmt_time(start)}</b></span>'
         f'<span>Duración <b>{fmt_time(end - start)}</b></span>'
         f'<span>Fin <b>{fmt_time(end)}</b></span></div>', unsafe_allow_html=True)
-    st.audio(result["data"], format=result["mime"], start_time=float(start), end_time=float(end))
+    if not is_video:
+        st.audio(result["data"], format=result["mime"], start_time=float(start), end_time=float(end))
     fade = st.toggle("Suavizar inicio y final", value=False, key=f"fade_{uid}")
-    if st.button("Cortar audio", key=f"cut_{uid}"):
+    if is_video:
+        st.caption("El corte de video se vuelve a codificar para que sea exacto; en 4K puede tardar.")
+    if st.button("Aplicar corte", key=f"cut_{uid}"):
         try:
             with st.spinner("Cortando"):
-                data = trim_audio(result["data"], ext, start, end, fade)
+                data = trim_media(result["data"], ext, start, end, fade)
             base = result["name"].rsplit(".", 1)[0]
             st.session_state.trimmed = {"name": f"{base} (recorte).{ext}", "data": data, "mime": result["mime"]}
         except Exception as e:
-            show_error(e, "No se pudo cortar el audio.")
+            show_error(e, "No se pudo cortar el archivo.")
     t = st.session_state.trimmed
     if t:
-        st.success(f"{t['name']}  ({len(t['data']) / 1024:.0f} KB)")
+        size = len(t["data"]) / 1024
+        st.success(f"{t['name']}  ({size / 1024:.1f} MB)" if size > 1024 else f"{t['name']}  ({size:.0f} KB)")
         st.download_button("Descargar recorte", data=t["data"], file_name=t["name"], mime=t["mime"],
                            key=f"dl_trim_{uid}")
 
@@ -878,6 +994,15 @@ with tab_yt:
         st.caption("Si YouTube pide verificar que no eres un bot, exporta tus cookies de YouTube "
                    "en formato cookies.txt con una extensión del navegador y súbelas aquí.")
         cookie_up = st.file_uploader("Archivo cookies.txt", type=["txt"], key="cookies")
+        st.caption(f"Motor de descarga: yt-dlp {yt_dlp.version.__version__}. "
+                   "Si YouTube devuelve error 403, actualízalo y reinicia la app.")
+        if st.button("Actualizar yt-dlp", key="upd_ytdlp"):
+            try:
+                with st.spinner("Actualizando"):
+                    ver = update_ytdlp()
+                st.success(f"yt-dlp actualizado a {ver}. Reinicia la app (Ctrl+C y streamlit run app.py) para usarlo.")
+            except Exception as e:
+                show_error(e, "No se pudo actualizar.")
     cookiefile = None
     if cookie_up is not None:
         cookiefile = os.path.join(tempfile.gettempdir(), f"anghell_cookies_{abs(hash(cookie_up.name))}.txt")
@@ -916,6 +1041,7 @@ with tab_yt:
     if st.button("Convertir", disabled=info is None, key="convert"):
         st.session_state.result = None
         st.session_state.trimmed = None
+        st.session_state.show_trim = False
         try:
             st.session_state.result = convert(url.strip(), choice, cookiefile)
         except Exception as e:
@@ -926,8 +1052,15 @@ with tab_yt:
         st.success(f"{r['name']}  ({len(r['data']) / (1024 * 1024):.1f} MB)")
         st.download_button("Descargar completo", data=r["data"], file_name=r["name"],
                            mime=r["mime"], key="yt_download")
-        if FFMPEG and r["name"].lower().endswith((".mp3", ".wav")):
-            audio_trimmer(r)
+        if FFMPEG:
+            is_video = r["name"].lower().endswith(".mp4")
+            label = ("Cerrar editor" if st.session_state.show_trim
+                     else ("Cortar video" if is_video else "Cortar audio"))
+            if st.button(label, key="toggle_trim"):
+                st.session_state.show_trim = not st.session_state.show_trim
+                st.rerun()
+            if st.session_state.show_trim:
+                media_trimmer(r)
 
 with tab_mi:
     q = st.text_input("Busca un sonido o pega su enlace", key="mi_q",
