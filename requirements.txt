@@ -3,3 +3,4 @@ yt-dlp[default]>=2025.11.12
 deno>=2.0.0
 imageio-ffmpeg>=0.5.1
 requests>=2.31.0
+numpy>=1.24
