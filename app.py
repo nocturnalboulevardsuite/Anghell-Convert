@@ -11,7 +11,9 @@ Efectos:
   entra girando como una hoja mientras la lava baja.
 """
 
+import hashlib
 import html
+import inspect
 import os
 import re
 import shutil
@@ -19,6 +21,7 @@ import subprocess
 import tempfile
 from urllib.parse import quote
 
+import numpy as np
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -39,7 +42,7 @@ def make_page_icon() -> Image.Image:
 
 st.set_page_config(page_title="Anghell Convert", page_icon=make_page_icon(), layout="centered")
 
-for k, v in {"result": None, "sounds": {}}.items():
+for k, v in {"result": None, "sounds": {}, "trimmed": None}.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -137,7 +140,7 @@ CSS = """
 
 :root {
   --bg: #060303;
-  --panel: rgba(12, 6, 5, 0.70);
+  --panel: rgba(12, 6, 5, 0.80);
   --pill: rgba(22, 10, 8, 0.72);
   --text: #fbefe6;
   --muted: #b39d92;
@@ -150,7 +153,7 @@ CSS = """
 }
 :root[data-ac-theme="light"] {
   --bg: #f3e7dc;
-  --panel: rgba(255, 249, 243, 0.80);
+  --panel: rgba(255, 249, 243, 0.86);
   --pill: rgba(255, 255, 255, 0.80);
   --text: #1c0a04;
   --muted: #6e4f40;
@@ -165,9 +168,10 @@ CSS = """
 html { background: var(--bg) !important; }
 body, #root, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"],
 [data-testid="stBottom"], [data-testid="stBottomBlockContainer"] { background: transparent !important; }
-.stApp, .stApp p, .stApp label, .stApp span, .stApp div, .stApp input, .stApp button {
+.stApp, .stApp p, .stApp label, .stApp input, .stApp button, .stApp textarea {
   font-family: 'Manrope', system-ui, sans-serif;
 }
+[data-testid="stIconMaterial"] { font-family: 'Material Symbols Rounded' !important; }
 .stApp { color: var(--text); }
 [data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"] { display: none !important; }
 
@@ -189,14 +193,12 @@ div[data-testid="stElementContainer"]:has(.ac-engine-host),
 [data-testid="stMain"], section.main { perspective: 1800px; }
 .block-container, [data-testid="stMainBlockContainer"] {
   max-width: 780px;
-  margin-top: 4.5rem; margin-bottom: 4rem;
-  padding: 2.2rem 2.2rem 1.6rem !important;
+  margin-top: 1.6rem; margin-bottom: 4rem;
+  padding: 1.2rem 2.2rem 1.6rem !important;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 26px;
-  backdrop-filter: blur(14px) saturate(1.2);
-  -webkit-backdrop-filter: blur(14px) saturate(1.2);
-  box-shadow: 0 30px 80px rgba(0, 0, 0, .35), 0 0 0 1px rgba(255, 120, 40, .05) inset;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .35);
 }
 .ac-flip { animation: ac-pageflip 1.35s cubic-bezier(.16, .84, .24, 1) both;
            transform-origin: left center; }
@@ -214,7 +216,6 @@ div[data-testid="stElementContainer"]:has(.ac-engine-host),
   padding: .55rem 1rem; border-radius: 999px;
   border: 1px solid var(--border); background: var(--panel); color: var(--text);
   font: 600 .86rem 'Manrope', system-ui, sans-serif; cursor: pointer;
-  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
   box-shadow: 0 4px 20px var(--glow); transition: transform .2s, box-shadow .2s;
 }
 #ac-theme-toggle:hover { transform: translateY(-1px); box-shadow: 0 6px 28px var(--glow); }
@@ -228,13 +229,13 @@ div[data-testid="stElementContainer"]:has(.ac-engine-host),
 #ac-theme-toggle.ac-busy { pointer-events: none; }
 
 /* ─────────────── Logo de lava ─────────────── */
-.ac-hero { text-align: center; margin-bottom: 1.2rem; }
-.ac-emblem { display: inline-block; animation: ac-pulse 3.2s ease-in-out infinite; }
-.ac-emblem svg { width: 92px; height: 92px; display: block; }
-@keyframes ac-pulse {
-  0%, 100% { filter: drop-shadow(0 0 10px rgba(255, 70, 0, .55)); }
-  50%      { filter: drop-shadow(0 0 26px rgba(255, 120, 0, .85)); }
-}
+.ac-hero { text-align: center; margin: 0 auto 1.2rem; display: flex; flex-direction: column; align-items: center; }
+.ac-emblem { display: inline-block; position: relative; }
+.ac-emblem svg { width: 74px; height: 74px; display: block; position: relative; }
+.ac-emblem::before { content: ""; position: absolute; inset: -14px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 110, 0, .55), transparent 65%);
+  animation: ac-pulse 3.2s ease-in-out infinite; }
+@keyframes ac-pulse { 0%, 100% { opacity: .45; transform: scale(.92); } 50% { opacity: 1; transform: scale(1.05); } }
 .ac-ring { transform-box: fill-box; transform-origin: center; animation: ac-spin 22s linear infinite; }
 @keyframes ac-spin { to { transform: rotate(360deg); } }
 .ac-s1 { stop-color: #fff2b8; animation: ac-s1 2.6s ease-in-out infinite alternate; }
@@ -251,8 +252,9 @@ div[data-testid="stElementContainer"]:has(.ac-engine-host),
   background-image: __CRUST__, var(--lava);
   background-size: 320px 320px, 320% 100%;
   -webkit-background-clip: text; background-clip: text; color: transparent;
-  animation: ac-molten 14s linear infinite;
-  filter: drop-shadow(0 0 10px rgba(255, 70, 0, .55)) drop-shadow(0 2px 0 rgba(60, 4, 0, .6));
+  animation: ac-molten 18s linear infinite;
+  text-shadow: none;
+  filter: drop-shadow(0 0 12px rgba(255, 70, 0, .5));
   padding: 0 .08em;
 }
 @keyframes ac-molten {
@@ -275,8 +277,9 @@ div[data-testid="stElementContainer"]:has(.ac-engine-host),
 @keyframes ac-drip { 0% { height: 0 } 55% { height: 16px } 66% { height: 20px }
                      80% { height: 6px } 100% { height: 0 } }
 @keyframes ac-fall { 0%, 62% { opacity: 0; transform: translateY(0) }
-                     64% { opacity: 1 } 100% { opacity: 0; transform: translateY(80px) scale(.6) } }
-.ac-sub { color: var(--muted) !important; font-size: 1.02rem; margin: 1.1rem auto 0; max-width: 48ch; }
+                     64% { opacity: 1 } 100% { opacity: 0; transform: translateY(34px) scale(.6) } }
+.ac-hero .ac-sub { color: var(--muted) !important; font-size: 1.02rem; text-align: center !important;
+  margin: 1.5rem auto 0 !important; max-width: 46ch; width: 100%; padding: 0 !important; }
 
 /* ─────────────── Pestañas ─────────────── */
 .stTabs [data-baseweb="tab-list"] { gap: .35rem; border-bottom: 1px solid var(--border); }
@@ -287,8 +290,8 @@ div[data-testid="stElementContainer"]:has(.ac-engine-host),
 .stTabs [data-baseweb="tab"] p { color: inherit !important; font-weight: 700; font-size: .98rem; }
 .stTabs [data-baseweb="tab"]:hover { color: var(--text); background: var(--pill); }
 .stTabs [data-baseweb="tab"][aria-selected="true"] { color: var(--text); }
-.stTabs [data-baseweb="tab-highlight"] { background: var(--lava) !important; background-size: 320% 100% !important;
-  height: 3px; border-radius: 3px; animation: ac-btnflow 5s linear infinite; }
+.stTabs [data-baseweb="tab-highlight"] { background: linear-gradient(90deg, #ff2a00, #ffb000) !important;
+  height: 3px; border-radius: 3px; }
 .stTabs [data-baseweb="tab"]::before {
   content: ""; width: 17px; height: 17px; margin-right: .5rem; background: currentColor;
   -webkit-mask: __I_FILM__ center / contain no-repeat; mask: __I_FILM__ center / contain no-repeat; }
@@ -311,35 +314,35 @@ div[data-testid="stElementContainer"]:has(.ac-engine-host),
 .stTextInput [data-baseweb="input"], .stTextInput [data-baseweb="base-input"] {
   background: transparent !important; border: none !important; }
 
-div[role="radiogroup"] { gap: .55rem; flex-wrap: wrap; }
-div[role="radiogroup"] > label {
+div[role="radiogroup"] { gap: .55rem !important; flex-wrap: wrap; }
+[data-testid="stRadioOption"] {
   display: inline-flex !important; align-items: center;
   background: var(--pill); border: 1px solid var(--border); border-radius: 999px;
-  padding: .5rem 1rem !important; margin: 0 !important;
-  transition: border-color .2s, box-shadow .2s, transform .2s; cursor: pointer;
+  padding: .5rem 1rem !important; margin: 0 !important; cursor: pointer;
+  transition: border-color .2s, box-shadow .2s, transform .2s;
 }
-div[role="radiogroup"] > label:hover { transform: translateY(-1px); }
-div[role="radiogroup"] > label > div:first-child { display: none; }
-div[role="radiogroup"] > label p { color: var(--text) !important; font-weight: 600; }
-div[role="radiogroup"] > label::before {
-  content: ""; width: 17px; height: 17px; margin-right: .5rem; flex-shrink: 0;
-  background: var(--muted);
-  -webkit-mask: __I_FILM__ center / contain no-repeat; mask: __I_FILM__ center / contain no-repeat;
-}
-div[role="radiogroup"] > label:nth-child(1)::before {
+[data-testid="stRadioOption"]:hover { transform: translateY(-1px); border-color: rgba(255, 90, 30, .6); }
+[data-testid="stRadioOption"] > div > div:first-child:not([data-testid]) { display: none !important; }
+[data-testid="stRadioOption"] p { color: var(--text) !important; font-weight: 600; margin: 0 !important; }
+[data-testid="stRadioOption"]::before {
+  content: ""; width: 17px; height: 17px; margin-right: .5rem; flex-shrink: 0; background: var(--muted);
+  -webkit-mask: __I_FILM__ center / contain no-repeat; mask: __I_FILM__ center / contain no-repeat; }
+div[role="radiogroup"] > div:nth-child(1) [data-testid="stRadioOption"]::before {
   -webkit-mask-image: __I_NOTE__; mask-image: __I_NOTE__; }
-div[role="radiogroup"] > label:nth-child(2)::before {
+div[role="radiogroup"] > div:nth-child(2) [data-testid="stRadioOption"]::before {
   -webkit-mask-image: __I_WAVE__; mask-image: __I_WAVE__; }
-div[role="radiogroup"] > label:has(input:checked) {
-  border-color: #ff4d00; box-shadow: 0 0 18px var(--glow), inset 0 0 12px rgba(255, 80, 0, .12); }
-div[role="radiogroup"] > label:has(input:checked)::before { background: #ff5a00; }
+[data-testid="stRadioOption"][data-selected="true"] {
+  border-color: #ff4d00; background: linear-gradient(180deg, rgba(255, 80, 0, .16), rgba(255, 80, 0, .05)), var(--pill);
+  box-shadow: 0 0 16px var(--glow); }
+[data-testid="stRadioOption"][data-selected="true"]::before { background: #ff5a00; }
+[data-testid="stRadioOption"]:has(input:focus-visible) { outline: 2px solid #ff9a00; outline-offset: 2px; }
 
 .stButton > button, .stDownloadButton > button {
   width: 100%; border: none !important; border-radius: 14px !important;
   padding: .85rem 1rem !important; color: #fff !important;
   background: var(--lava) !important; background-size: 320% 100% !important;
-  animation: ac-btnflow 9s linear infinite;
-  box-shadow: 0 8px 28px var(--glow); transition: transform .15s, box-shadow .2s;
+  background-position: 20% 50% !important;
+  box-shadow: 0 8px 28px var(--glow); transition: transform .15s, box-shadow .2s, background-position .8s ease;
 }
 .stButton > button p, .stDownloadButton > button p {
   font-family: 'Unbounded', sans-serif !important; font-weight: 700; color: #fff !important;
@@ -350,7 +353,7 @@ div[role="radiogroup"] > label:has(input:checked)::before { background: #ff5a00;
 .stDownloadButton > button::before, [class*="st-key-mi_prep_"] button::before {
   -webkit-mask-image: __I_DOWNLOAD__; mask-image: __I_DOWNLOAD__; }
 .stButton > button:hover, .stDownloadButton > button:hover {
-  transform: translateY(-2px); box-shadow: 0 12px 36px var(--glow); }
+  transform: translateY(-2px); box-shadow: 0 12px 36px var(--glow); background-position: 80% 50% !important; }
 .stButton > button:disabled { filter: grayscale(.7) brightness(.8); opacity: .6; }
 .stButton > button:focus-visible, .stDownloadButton > button:focus-visible {
   outline: 2px solid #ff9a00 !important; outline-offset: 3px; }
@@ -393,6 +396,27 @@ div[role="radiogroup"] > label:has(input:checked)::before { background: #ff5a00;
 [data-testid="stProgress"] [role="progressbar"] > div > div {
   background: var(--lava) !important; background-size: 320% 100% !important;
   animation: ac-btnflow 3s linear infinite; }
+
+/* Editor de recorte */
+.ac-trim-title { font-family: 'Unbounded', sans-serif; font-weight: 700; font-size: 1.05rem;
+  color: var(--text); margin: 1.4rem 0 .2rem; }
+.ac-wave { background: var(--input); border: 1px solid var(--border); border-radius: 16px;
+  padding: 10px 14px; margin-bottom: -.4rem; }
+.ac-wave svg { width: 100%; height: 120px; display: block; }
+.ac-wave .wf-off { fill: var(--muted); opacity: .28; }
+.ac-wave .wf-on { fill: url(#wfLava); }
+.ac-wave .wf-region { fill: rgba(255, 90, 0, .10); stroke: #ff5a00; stroke-width: 2; }
+.ac-wave .wf-handle { fill: #ff5a00; }
+.ac-wave .wf-grip { fill: #fff3d6; }
+[data-testid="stSlider"] { padding: 0 14px; }
+[data-testid="stSlider"] [role="slider"] { background: #ff5a00 !important; border: 3px solid #ffd36a !important;
+  box-shadow: 0 0 12px var(--glow) !important; width: 18px !important; height: 18px !important; }
+[data-testid="stSliderThumbValue"], [data-testid="stSliderTickBarMin"], [data-testid="stSliderTickBarMax"] {
+  color: var(--muted) !important; font-family: 'Manrope', sans-serif !important; }
+.ac-trim-times { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted);
+  font-size: .9rem; margin: -.3rem 14px .8rem; }
+.ac-trim-times b { color: var(--text); font-variant-numeric: tabular-nums; }
+[data-testid="stToggle"] p { color: var(--text) !important; }
 
 .ac-foot { color: var(--muted) !important; font-size: .8rem; text-align: center; margin-top: 2.2rem; }
 
@@ -584,6 +608,113 @@ def convert(url: str, choice: str, cookiefile=None):
     raise last_err or RuntimeError("Error desconocido.")
 
 
+# ════════════════════════════ Editor de recorte (estilo Discord) ════════════════════════════
+@st.cache_data(show_spinner=False, max_entries=6)
+def waveform_peaks(data: bytes, ext: str, bars: int = 160):
+    """Decodifica el audio a mono y devuelve picos normalizados + duración en segundos."""
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "in." + ext)
+        with open(src, "wb") as fh:
+            fh.write(data)
+        proc = subprocess.run([FFMPEG, "-v", "error", "-i", src, "-ac", "1", "-ar", "8000",
+                               "-f", "s16le", "pipe:1"], capture_output=True, check=True)
+    samples = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    duration = len(samples) / 8000.0
+    if len(samples) == 0:
+        return [0.0] * bars, 0.0
+    chunks = np.array_split(np.abs(samples), bars)
+    peaks = np.array([float(np.sqrt(np.mean(c ** 2))) if len(c) else 0.0 for c in chunks])
+    peaks = peaks / (peaks.max() or 1.0)
+    return [round(float(p), 3) for p in np.clip(peaks ** 0.75, 0.04, 1.0)], duration
+
+
+def waveform_svg(peaks, start: float, end: float, duration: float) -> str:
+    n, W, H = len(peaks), 1000, 120
+    bw = W / n
+    s_frac, e_frac = (start / duration, end / duration) if duration else (0, 1)
+    bars = []
+    for i, p in enumerate(peaks):
+        h = max(4, p * (H - 24))
+        x, y = i * bw + bw * 0.18, (H - h) / 2
+        inside = s_frac <= (i + 0.5) / n <= e_frac
+        bars.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw * 0.64:.1f}" height="{h:.1f}" rx="{bw * 0.32:.1f}" '
+                    f'class="{"wf-on" if inside else "wf-off"}"/>')
+    sx, ex = s_frac * W, e_frac * W
+    return f"""
+<div class="ac-wave">
+  <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" role="img" aria-label="Forma de onda del audio">
+    <defs><linearGradient id="wfLava" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffd36a"/><stop offset="50%" stop-color="#ff5a00"/>
+      <stop offset="100%" stop-color="#c41a00"/></linearGradient></defs>
+    <rect x="{sx:.1f}" y="2" width="{max(ex - sx, 0):.1f}" height="{H - 4}" rx="10" class="wf-region"/>
+    {''.join(bars)}
+    <rect x="{sx - 5:.1f}" y="0" width="10" height="{H}" rx="5" class="wf-handle"/>
+    <rect x="{ex - 5:.1f}" y="0" width="10" height="{H}" rx="5" class="wf-handle"/>
+    <rect x="{sx - 1.5:.1f}" y="{H / 2 - 14}" width="3" height="28" rx="1.5" class="wf-grip"/>
+    <rect x="{ex - 1.5:.1f}" y="{H / 2 - 14}" width="3" height="28" rx="1.5" class="wf-grip"/>
+  </svg>
+</div>"""
+
+
+def fmt_time(sec: float) -> str:
+    m, s = divmod(max(sec, 0), 60)
+    return f"{int(m)}:{s:04.1f}"
+
+
+def trim_audio(data: bytes, ext: str, start: float, end: float, fade: bool) -> bytes:
+    with tempfile.TemporaryDirectory() as d:
+        src, dst = os.path.join(d, "in." + ext), os.path.join(d, "out." + ext)
+        with open(src, "wb") as fh:
+            fh.write(data)
+        length = max(end - start, 0.1)
+        cmd = [FFMPEG, "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", src]
+        if fade:
+            f = min(0.4, length / 4)
+            cmd += ["-af", f"afade=t=in:st=0:d={f:.2f},afade=t=out:st={length - f:.3f}:d={f:.2f}"]
+        cmd += ["-c:a", "libmp3lame", "-b:a", "320k"] if ext == "mp3" else ["-c:a", "pcm_s16le"]
+        subprocess.run(cmd + [dst], check=True, capture_output=True)
+        with open(dst, "rb") as fh:
+            return fh.read()
+
+
+def audio_trimmer(result: dict):
+    ext = result["name"].rsplit(".", 1)[-1].lower()
+    try:
+        peaks, duration = waveform_peaks(result["data"], ext)
+    except Exception as e:
+        show_error(e, "No se pudo leer el audio para recortarlo.")
+        return
+    if duration <= 0.2:
+        return
+    uid = hashlib.md5(result["name"].encode()).hexdigest()[:8]
+    st.markdown('<div class="ac-trim-title">Recortar audio</div>', unsafe_allow_html=True)
+    wave_slot = st.empty()
+    start, end = st.slider("Selección", 0.0, float(round(duration, 1)), (0.0, float(round(duration, 1))),
+                           step=0.1, key=f"trim_{uid}", label_visibility="collapsed", format="%.1f s")
+    if end - start < 0.2:
+        end = min(duration, start + 0.2)
+    wave_slot.markdown(waveform_svg(peaks, start, end, duration), unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="ac-trim-times"><span>Inicio <b>{fmt_time(start)}</b></span>'
+        f'<span>Duración <b>{fmt_time(end - start)}</b></span>'
+        f'<span>Fin <b>{fmt_time(end)}</b></span></div>', unsafe_allow_html=True)
+    st.audio(result["data"], format=result["mime"], start_time=float(start), end_time=float(end))
+    fade = st.toggle("Suavizar inicio y final", value=False, key=f"fade_{uid}")
+    if st.button("Cortar audio", key=f"cut_{uid}"):
+        try:
+            with st.spinner("Cortando"):
+                data = trim_audio(result["data"], ext, start, end, fade)
+            base = result["name"].rsplit(".", 1)[0]
+            st.session_state.trimmed = {"name": f"{base} (recorte).{ext}", "data": data, "mime": result["mime"]}
+        except Exception as e:
+            show_error(e, "No se pudo cortar el audio.")
+    t = st.session_state.trimmed
+    if t:
+        st.success(f"{t['name']}  ({len(t['data']) / 1024:.0f} KB)")
+        st.download_button("Descargar recorte", data=t["data"], file_name=t["name"], mime=t["mime"],
+                           key=f"dl_trim_{uid}")
+
+
 # ════════════════════════════ MyInstants ════════════════════════════
 PLAY_RE = re.compile(
     r"""play\(\s*['"]([^'"]+?\.mp3)['"](?:\s*,\s*['"][^'"]*['"]\s*,\s*['"]([^'"]*)['"])?""")
@@ -746,6 +877,7 @@ with tab_yt:
 
     if st.button("Convertir", disabled=info is None, key="convert"):
         st.session_state.result = None
+        st.session_state.trimmed = None
         try:
             st.session_state.result = convert(url.strip(), choice, cookiefile)
         except Exception as e:
@@ -754,8 +886,10 @@ with tab_yt:
     if st.session_state.result:
         r = st.session_state.result
         st.success(f"{r['name']}  ({len(r['data']) / (1024 * 1024):.1f} MB)")
-        st.download_button("Descargar archivo", data=r["data"], file_name=r["name"],
+        st.download_button("Descargar completo", data=r["data"], file_name=r["name"],
                            mime=r["mime"], key="yt_download")
+        if FFMPEG and r["name"].lower().endswith((".mp3", ".wav")):
+            audio_trimmer(r)
 
 with tab_mi:
     q = st.text_input("Busca un sonido o pega su enlace", key="mi_q",
@@ -811,14 +945,14 @@ ENGINE_JS = r"""
   if (!root.dataset.acTheme) root.dataset.acTheme = 'dark';
 
   /* ---------- Botón de tema con íconos dibujados ---------- */
-  const SUN = '<svg class="ac-ico-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/>' +
-    '<path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6' +
-    'M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>';
-  const MOON = '<svg class="ac-ico-moon" viewBox="0 0 24 24">' +
-    '<path d="M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.6 8.6 0 1 0 11.1 11.1z"/></svg>';
+  const SUN = '\x3csvg class="ac-ico-sun" viewBox="0 0 24 24">\x3ccircle cx="12" cy="12" r="4.2"/>' +
+    '\x3cpath d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6' +
+    'M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/>\x3c/svg>';
+  const MOON = '\x3csvg class="ac-ico-moon" viewBox="0 0 24 24">' +
+    '\x3cpath d="M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.6 8.6 0 1 0 11.1 11.1z"/>\x3c/svg>';
   const btn = D.createElement('button');
   btn.id = 'ac-theme-toggle'; btn.type = 'button';
-  btn.innerHTML = SUN + MOON + '<span class="ac-tlabel"></span>';
+  btn.innerHTML = SUN + MOON + '\x3cspan class="ac-tlabel">\x3c/span>';
   D.body.appendChild(btn);
   function syncBtn() {
     const dark = root.dataset.acTheme !== 'light';
@@ -832,7 +966,7 @@ ENGINE_JS = r"""
   let theme = root.dataset.acTheme === 'light' ? 1 : 0;
   const START = performance.now();
   const RISE = 60, HOLD = 12, DRAIN = 24, REST = 4, CYCLE = RISE + HOLD + DRAIN + REST;
-  const BASE = 0.02, TOP = 0.5;
+  const BASE = 0.012, TOP = 0.5;
   const ss = x => x * x * (3 - 2 * x);
   function levelAt(t) {
     const c = t % CYCLE; let k;
@@ -899,7 +1033,7 @@ void main(){
   float t = uTime;
 
   float L = mix(uLevel, 1.32, uBurst);
-  float amp = (0.016 + 0.040 * uBurst) * smoothstep(0.0, 0.05, L);
+  float amp = (0.014 + 0.040 * uBurst) * (0.35 + 0.65 * smoothstep(0.0, 0.08, L));
   float wave = sin(p.x * 5.0 + t * 1.4) * 0.6 + sin(p.x * 11.0 - t * 2.1) * 0.25
              + (fbm(vec2(p.x * 2.5 - t * 0.2, t * 0.45)) - 0.5) * 1.6;
   float surf = L + amp * wave;
@@ -945,6 +1079,9 @@ void main(){
       }
     }
     col = mix(earth, vec3(1.0, 0.58, 0.16), clamp(emb, 0.0, 1.0) * on);
+    // Borde suavizado entre tierra y lava (sin escalones)
+    float px = 2.5 / uRes.y;
+    col = mix(col, vec3(1.0, 0.72, 0.30), (1.0 - smoothstep(0.0, px, dy)) * on);
 
     float vig = smoothstep(0.35, 1.25, length((uv - 0.5) * vec2(asp, 1.0)));
     col *= 1.0 - vig * 0.45 * (1.0 - uTheme);
@@ -1020,14 +1157,14 @@ void main(){
           uTheme = U('uTheme'), uBurst = U('uBurst');
 
     // Calidad adaptativa: baja la resolución interna si el equipo va lento
-    let Q = innerWidth < 700 ? 0.55 : 0.75, slow = 0, last = 0;
+    let Q = innerWidth < 700 ? 0.5 : 0.6, slow = 0, last = 0;
     function resize() {
       const w = Math.max(2, Math.round(innerWidth * Q)), h = Math.max(2, Math.round(innerHeight * Q));
       if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; gl.viewport(0, 0, w, h); }
     }
     return function (now, t, level) {
       if (last) {
-        slow = (now - last) > 30 ? slow + 1 : Math.max(0, slow - 1);
+        slow = (now - last) > 60 ? slow + 1 : Math.max(0, slow - 1);
         if (slow > 90 && Q > 0.35) { Q -= 0.08; slow = 0; }
       }
       last = now;
@@ -1042,9 +1179,14 @@ void main(){
   }
 
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let lastDraw = 0;
   function loop(now) {
-    const t = (now - START) / 1000;
-    if (draw) draw(now, reduce ? t * 0.3 : t, levelAt(t));
+    // Máximo ~30 fps (o cada frame durante la transición) para no cargar el equipo
+    if (now - lastDraw >= 32 || burst > 0) {
+      lastDraw = now;
+      const t = (now - START) / 1000;
+      if (draw) draw(now, reduce ? t * 0.3 : t, levelAt(t));
+    }
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
@@ -1085,8 +1227,6 @@ void main(){
   });
 })();
 """
-
-import inspect
 
 if "unsafe_allow_javascript" in inspect.signature(st.html).parameters:
     # Streamlit reciente: el script corre directo en la página, sin iframe
