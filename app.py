@@ -4,7 +4,7 @@ Convertidor de YouTube / Shorts a MP3, WAV o MP4 (4K, 1080p, 720p, 480p)
 y descargador de sonidos de MyInstants en MP3 o WAV.
 
 Efectos:
-- Fondo de tierra volcánica renderizado en WebGL, detrás del convertidor.
+- Fondo de piedra estático y lava estilo cartoon animada solo con CSS (muy liviana).
 - Lava que sube muy despacio durante 1 minuto hasta la mitad de la pantalla,
   se queda arriba, se vacía y vuelve a empezar (loop).
 - Cambio de tema: la lava inunda la pantalla, cambia el tema y la página
@@ -130,6 +130,8 @@ CRUST = (
     "<feColorMatrix values='0 0 0 0 0.13  0 0 0 0 0.015  0 0 0 0 0  3.2 0 0 0 -1.55'/></filter>"
     "<rect width='100%' height='100%' filter='url(#n)'/></svg>"
 )
+ICONS["__TILE_DARK__"] = "url(\"data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%27132%27%20height%3D%2788%27%3E%3Cg%20fill%3D%27%231c0c0a%27%20stroke%3D%27%230d0504%27%20stroke-width%3D%273%27%3E%3Crect%20x%3D%272%27%20y%3D%272%27%20width%3D%2760%27%20height%3D%2740%27%20rx%3D%279%27/%3E%3Crect%20x%3D%2768%27%20y%3D%272%27%20width%3D%2762%27%20height%3D%2740%27%20rx%3D%279%27/%3E%3Crect%20x%3D%27-31%27%20y%3D%2746%27%20width%3D%2760%27%20height%3D%2740%27%20rx%3D%279%27/%3E%3Crect%20x%3D%2735%27%20y%3D%2746%27%20width%3D%2762%27%20height%3D%2740%27%20rx%3D%279%27/%3E%3Crect%20x%3D%27103%27%20y%3D%2746%27%20width%3D%2760%27%20height%3D%2740%27%20rx%3D%279%27/%3E%3C/g%3E%3C/svg%3E\")"
+ICONS["__TILE_LIGHT__"] = "url(\"data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%27132%27%20height%3D%2788%27%3E%3Cg%20fill%3D%27%23f1dcc6%27%20stroke%3D%27%23e2c4a6%27%20stroke-width%3D%273%27%3E%3Crect%20x%3D%272%27%20y%3D%272%27%20width%3D%2760%27%20height%3D%2740%27%20rx%3D%279%27/%3E%3Crect%20x%3D%2768%27%20y%3D%272%27%20width%3D%2762%27%20height%3D%2740%27%20rx%3D%279%27/%3E%3Crect%20x%3D%27-31%27%20y%3D%2746%27%20width%3D%2760%27%20height%3D%2740%27%20rx%3D%279%27/%3E%3Crect%20x%3D%2735%27%20y%3D%2746%27%20width%3D%2762%27%20height%3D%2740%27%20rx%3D%279%27/%3E%3Crect%20x%3D%27103%27%20y%3D%2746%27%20width%3D%2760%27%20height%3D%2740%27%20rx%3D%279%27/%3E%3C/g%3E%3C/svg%3E\")"
 ICONS["__CRUST__"] = "url(\"data:image/svg+xml;utf8," + quote(CRUST) + "\")"
 
 
@@ -150,6 +152,8 @@ CSS = """
   --lava: linear-gradient(100deg, #6e0800, #ff2a00 18%, #ffb000 32%, #ff4a00 48%,
                           #9a0e00 62%, #ff6a00 78%, #ffd36a 88%, #b81400);
   color-scheme: dark;
+  --vignette: rgba(0, 0, 0, .65);
+  --tile: __TILE_DARK__;
 }
 :root[data-ac-theme="light"] {
   --bg: #f3e7dc;
@@ -161,11 +165,12 @@ CSS = """
   --input: rgba(255, 255, 255, 0.94);
   --glow: rgba(255, 90, 20, 0.25);
   color-scheme: light;
+  --vignette: rgba(120, 60, 20, .18);
+  --tile: __TILE_LIGHT__;
 }
 
 /* El fondo pintado va en <html>; todo lo demás transparente para que la lava
    (z-index -1) quede DETRÁS del convertidor y el convertidor siempre visible. */
-html { background: var(--bg) !important; }
 body, #root, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"],
 [data-testid="stBottom"], [data-testid="stBottomBlockContainer"] { background: transparent !important; }
 .stApp, .stApp p, .stApp label, .stApp input, .stApp button, .stApp textarea {
@@ -175,15 +180,48 @@ body, #root, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"],
 .stApp { color: var(--text); }
 [data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"] { display: none !important; }
 
-#ac-lava { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: -1;
-           pointer-events: none; display: block; }
-#ac-lava-fallback { position: fixed; left: 0; right: 0; bottom: 0; height: 2vh; z-index: -1;
-  pointer-events: none;
-  background: linear-gradient(to top, #4a0400, #c42200 55%, #ff8a10 92%, #ffd27a);
-  box-shadow: 0 -30px 80px rgba(255, 80, 0, .45);
-  animation: ac-fb-rise 100s ease-in-out infinite; }
-@keyframes ac-fb-rise { 0% { height: 2vh } 60% { height: 50vh } 72% { height: 50vh }
-                        96% { height: 2vh } 100% { height: 2vh } }
+/* ─────────────── Lava cartoon (solo transform/opacity: muy liviana) ─────────────── */
+html { background-color: var(--bg) !important;
+  background-image: radial-gradient(ellipse at 50% 30%, transparent 40%, var(--vignette) 100%), var(--tile) !important;
+  background-size: 100% 100%, 132px 88px !important; background-attachment: fixed !important; }
+#ac-lava { position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; contain: strict; }
+#ac-lava.ac-flood { z-index: 999990; }
+.ac-surge { position: absolute; inset: 0; transform: translateY(0);
+  transition: transform 1.1s cubic-bezier(.3, .7, .3, 1); will-change: transform; }
+.ac-surge.ac-up { transform: translateY(-112vh); transition: transform .75s cubic-bezier(.6, 0, .9, .6); }
+.ac-level { position: absolute; left: 0; right: 0; top: 100%; height: 230vh;
+  animation: ac-level 100s infinite; will-change: transform; }
+@keyframes ac-level {
+  0%   { transform: translateY(-3vh);  animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
+  60%  { transform: translateY(-50vh); animation-timing-function: linear; }
+  72%  { transform: translateY(-50vh); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
+  96%  { transform: translateY(-3vh); }
+  100% { transform: translateY(-3vh); }
+}
+.ac-heat { position: absolute; left: 0; right: 0; top: -150px; height: 150px;
+  background: linear-gradient(to top, rgba(255, 110, 20, .28), transparent); }
+.ac-body { position: absolute; inset: 0;
+  background: linear-gradient(to bottom, #ffa526 0, #ff7a1a 70px, #f2501a 32vh, #c8300f 70vh, #8f1f0b 100%); }
+.ac-body::before { content: ""; position: absolute; left: 0; right: 0; top: 10px; height: 26px;
+  background: linear-gradient(to bottom, rgba(255, 236, 160, .35), transparent); }
+.ac-lwave { position: absolute; left: 0; top: -38px; width: 200%; height: 40px;
+  animation: ac-wave 7s linear infinite; will-change: transform; }
+.ac-lwave.back { top: -50px; animation-duration: 11s; animation-direction: reverse; opacity: .75; }
+.ac-lwave svg { width: 100%; height: 100%; display: block; }
+@keyframes ac-wave { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.ac-bubble { position: absolute; top: 0; border-radius: 50%;
+  background: rgba(255, 214, 120, .55); box-shadow: inset -2px -2px 0 rgba(255, 255, 255, .35);
+  animation: ac-bubble linear infinite; will-change: transform, opacity; opacity: 0; }
+@keyframes ac-bubble {
+  0%   { transform: translateY(42vh) scale(.6); opacity: 0; }
+  15%  { opacity: 1; }
+  88%  { transform: translateY(14px) scale(1); opacity: 1; }
+  100% { transform: translateY(0) scale(1.5); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ac-level { animation: none; transform: translateY(-18vh); }
+  .ac-lwave, .ac-bubble { animation: none; }
+}
 
 div[data-testid="stElementContainer"]:has(iframe),
 div[data-testid="stElementContainer"]:has(.ac-engine-host),
@@ -252,7 +290,7 @@ div[data-testid="stElementContainer"]:has(.ac-engine-host),
   background-image: __CRUST__, var(--lava);
   background-size: 320px 320px, 320% 100%;
   -webkit-background-clip: text; background-clip: text; color: transparent;
-  animation: ac-molten 18s linear infinite;
+  background-position: 0 0, 30% 50%;
   text-shadow: none;
   filter: drop-shadow(0 0 12px rgba(255, 70, 0, .5));
   padding: 0 .08em;
@@ -937,22 +975,26 @@ st.markdown('<p class="ac-foot">Anghell Convert. Descarga solo contenido propio 
             unsafe_allow_html=True)
 
 
-# ════════════════════════════ Motor de lava (WebGL) ════════════════════════════
+# ════════════════════════════ Motor de efectos (lava cartoon + tema) ════════════════════════════
 # Se inyecta una sola vez en la página principal; sobrevive a los reruns de Streamlit.
 ENGINE_JS = r"""
 (function () {
   const D = document, root = D.documentElement;
   if (!root.dataset.acTheme) root.dataset.acTheme = 'dark';
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  /* ---------- Botón de tema con íconos dibujados ---------- */
-  const SUN = '\x3csvg class="ac-ico-sun" viewBox="0 0 24 24">\x3ccircle cx="12" cy="12" r="4.2"/>' +
-    '\x3cpath d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6' +
-    'M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/>\x3c/svg>';
-  const MOON = '\x3csvg class="ac-ico-moon" viewBox="0 0 24 24">' +
-    '\x3cpath d="M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.6 8.6 0 1 0 11.1 11.1z"/>\x3c/svg>';
+  /* ---------- Lava cartoon: todo se anima con CSS (transform), sin WebGL ---------- */
+  const lava = D.createElement('div');
+  lava.id = 'ac-lava';
+  lava.setAttribute('aria-hidden', 'true');
+  lava.innerHTML = "\u003cdiv class=\"ac-surge\">\u003cdiv class=\"ac-level\">\u003cdiv class=\"ac-heat\">\u003c/div>\u003cdiv class=\"ac-lwave back\">\u003csvg viewBox=\"0 0 2880 40\" preserveAspectRatio=\"none\">\u003cpath d=\"M0 20 Q180 0 360 20 T720 20 T1080 20 T1440 20 T1800 20 T2160 20 T2520 20 T2880 20 V40 H0 Z\" fill=\"#ff6a1a\"/>\u003c/svg>\u003c/div>\u003cdiv class=\"ac-body\">\u003ci class=\"ac-bubble\" style=\"left:6%;width:10px;height:10px;animation-duration:7s;animation-delay:-1s\">\u003c/i>\u003ci class=\"ac-bubble\" style=\"left:14%;width:16px;height:16px;animation-duration:9s;animation-delay:-4s\">\u003c/i>\u003ci class=\"ac-bubble\" style=\"left:23%;width:8px;height:8px;animation-duration:6s;animation-delay:-2s\">\u003c/i>\u003ci class=\"ac-bubble\" style=\"left:31%;width:12px;height:12px;animation-duration:8s;animation-delay:-6s\">\u003c/i>\u003ci class=\"ac-bubble\" style=\"left:42%;width:18px;height:18px;animation-duration:10s;animation-delay:-3s\">\u003c/i>\u003ci class=\"ac-bubble\" style=\"left:50%;width:9px;height:9px;animation-duration:7s;animation-delay:-5s\">\u003c/i>\u003ci class=\"ac-bubble\" style=\"left:58%;width:14px;height:14px;animation-duration:9s;animation-delay:-1s\">\u003c/i>\u003ci class=\"ac-bubble\" style=\"left:67%;width:10px;height:10px;animation-duration:6s;animation-delay:-4s\">\u003c/i>\u003ci class=\"ac-bubble\" style=\"left:74%;width:20px;height:20px;animation-duration:11s;animation-delay:-7s\">\u003c/i>\u003ci class=\"ac-bubble\" style=\"left:83%;width:12px;height:12px;animation-duration:8s;animation-delay:-2s\">\u003c/i>\u003ci class=\"ac-bubble\" style=\"left:91%;width:8px;height:8px;animation-duration:7s;animation-delay:-5s\">\u003c/i>\u003ci class=\"ac-bubble\" style=\"left:97%;width:15px;height:15px;animation-duration:9s;animation-delay:-3s\">\u003c/i>\u003c/div>\u003cdiv class=\"ac-lwave\">\u003csvg viewBox=\"0 0 2880 40\" preserveAspectRatio=\"none\">\u003cpath d=\"M0 20 Q180 0 360 20 T720 20 T1080 20 T1440 20 T1800 20 T2160 20 T2520 20 T2880 20 V40 H0 Z\" fill=\"#ffa526\"/>\u003cpath d=\"M0 20 Q180 0 360 20 T720 20 T1080 20 T1440 20 T1800 20 T2160 20 T2520 20 T2880 20\" fill=\"none\" stroke=\"#ffe07a\" stroke-width=\"5\" stroke-linecap=\"round\"/>\u003c/svg>\u003c/div>\u003c/div>\u003c/div>";
+  D.body.prepend(lava);
+  const surge = lava.querySelector('.ac-surge');
+
+  /* ---------- Botón de tema ---------- */
   const btn = D.createElement('button');
   btn.id = 'ac-theme-toggle'; btn.type = 'button';
-  btn.innerHTML = SUN + MOON + '\x3cspan class="ac-tlabel">\x3c/span>';
+  btn.innerHTML = "\u003csvg class=\"ac-ico-sun\" viewBox=\"0 0 24 24\">\u003ccircle cx=\"12\" cy=\"12\" r=\"4.2\"/>\u003cpath d=\"M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6\"/>\u003c/svg>" + "\u003csvg class=\"ac-ico-moon\" viewBox=\"0 0 24 24\">\u003cpath d=\"M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.6 8.6 0 1 0 11.1 11.1z\"/>\u003c/svg>" + "\u003cspan class=\"ac-tlabel\">\u003c/span>";
   D.body.appendChild(btn);
   function syncBtn() {
     const dark = root.dataset.acTheme !== 'light';
@@ -960,248 +1002,6 @@ ENGINE_JS = r"""
     btn.setAttribute('aria-label', dark ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro');
   }
   syncBtn();
-
-  /* ---------- Estado ---------- */
-  let burst = 0;
-  let theme = root.dataset.acTheme === 'light' ? 1 : 0;
-  const START = performance.now();
-  const RISE = 60, HOLD = 12, DRAIN = 24, REST = 4, CYCLE = RISE + HOLD + DRAIN + REST;
-  const BASE = 0.012, TOP = 0.5;
-  const ss = x => x * x * (3 - 2 * x);
-  function levelAt(t) {
-    const c = t % CYCLE; let k;
-    if (c < RISE) k = ss(c / RISE);                       // sube muy de a poco durante 60 s
-    else if (c < RISE + HOLD) k = 1;                      // se queda en la mitad
-    else if (c < RISE + HOLD + DRAIN) k = 1 - ss((c - RISE - HOLD) / DRAIN); // se vacía
-    else k = 0;
-    return BASE + (TOP - BASE) * k;
-  }
-
-  /* ---------- Shader de lava y tierra ---------- */
-  const FS = `
-precision highp float;
-uniform vec2 uRes;
-uniform float uTime;
-uniform float uLevel;
-uniform float uTheme;
-uniform float uBurst;
-
-float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-vec2 hash2(vec2 p){
-  return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453);
-}
-float noise(vec2 p){
-  vec2 i = floor(p); vec2 f = fract(p);
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
-             mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
-}
-float fbm(vec2 p){
-  float v = 0.0; float a = 0.5;
-  mat2 m = mat2(1.6, 1.2, -1.2, 1.6);
-  for (int i = 0; i < 5; i++){ v += a * noise(p); p = m * p; a *= 0.5; }
-  return v;
-}
-vec2 voronoi(vec2 p, float tt){
-  vec2 n = floor(p); vec2 f = fract(p);
-  float d1 = 8.0; float d2 = 8.0;
-  for (int j = -1; j <= 1; j++){
-    for (int i = -1; i <= 1; i++){
-      vec2 g = vec2(float(i), float(j));
-      vec2 o = hash2(n + g);
-      o = 0.5 + 0.4 * sin(tt + 6.2831 * o);
-      vec2 r = g + o - f;
-      float d = dot(r, r);
-      if (d < d1){ d2 = d1; d1 = d; } else if (d < d2){ d2 = d; }
-    }
-  }
-  return vec2(sqrt(d1), sqrt(d2));
-}
-vec3 lavaRamp(float h){
-  h = clamp(h, 0.0, 1.0);
-  vec3 c = mix(vec3(0.05, 0.010, 0.008), vec3(0.42, 0.030, 0.0), smoothstep(0.0, 0.30, h));
-  c = mix(c, vec3(0.95, 0.20, 0.02), smoothstep(0.30, 0.60, h));
-  c = mix(c, vec3(1.00, 0.60, 0.12), smoothstep(0.60, 0.85, h));
-  c = mix(c, vec3(1.00, 0.93, 0.62), smoothstep(0.85, 1.00, h));
-  return c;
-}
-
-void main(){
-  vec2 uv = gl_FragCoord.xy / uRes;
-  float asp = uRes.x / uRes.y;
-  vec2 p = vec2(uv.x * asp, uv.y);
-  float t = uTime;
-
-  float L = mix(uLevel, 1.32, uBurst);
-  float amp = (0.014 + 0.040 * uBurst) * (0.35 + 0.65 * smoothstep(0.0, 0.08, L));
-  float wave = sin(p.x * 5.0 + t * 1.4) * 0.6 + sin(p.x * 11.0 - t * 2.1) * 0.25
-             + (fbm(vec2(p.x * 2.5 - t * 0.2, t * 0.45)) - 0.5) * 1.6;
-  float surf = L + amp * wave;
-  float dy = uv.y - surf;
-  float on = smoothstep(0.0, 0.04, L);
-
-  vec3 col;
-  if (dy > 0.0){
-    /* ---- Tierra volcánica ---- */
-    vec2 ep = p * 3.0;
-    float e1 = fbm(ep * 1.2);
-    float e2 = fbm(ep * 4.5 + 7.3);
-    float strata = 0.5 + 0.5 * sin(p.y * 26.0 + fbm(ep * 0.7) * 7.0);
-    vec2 vc = voronoi(p * 6.0 + fbm(p * 3.0) * 1.5 + 3.0, 0.0);
-    float crack = 1.0 - smoothstep(0.0, 0.06, vc.y - vc.x);
-    vec3 darkE = mix(vec3(0.030, 0.024, 0.022), vec3(0.105, 0.072, 0.058), e1) * (0.75 + 0.5 * e2)
-               + strata * 0.012;
-    vec3 lightE = mix(vec3(0.78, 0.67, 0.57), vec3(0.94, 0.88, 0.80), e1) * (0.93 + 0.10 * e2)
-               - strata * 0.025;
-    vec3 earth = mix(darkE, lightE, uTheme);
-    earth *= 1.0 - crack * mix(0.55, 0.22, uTheme);
-
-    float heat = exp(-dy * 7.0) * on;
-    earth += crack * vec3(1.0, 0.32, 0.04) * pow(heat, 1.5) * 1.4 * (1.0 - 0.5 * uTheme);
-    float glow = exp(-dy * 16.0) * on;
-    earth = mix(earth, vec3(1.0, 0.36, 0.05), clamp(glow * 0.6, 0.0, 1.0));
-    earth += vec3(0.5, 0.08, 0.0) * heat * 0.18 * (1.0 - uTheme);
-
-    /* ---- Brasas que suben ---- */
-    float emb = 0.0;
-    for (int i = 0; i < 3; i++){
-      float fi = float(i);
-      float sc = 16.0 + fi * 10.0;
-      vec2 q = vec2(p.x * sc + fi * 7.0, (dy - t * (0.06 + 0.03 * fi)) * sc);
-      vec2 id = floor(q); vec2 f = fract(q) - 0.5;
-      float rnd = hash(id + fi * 13.1);
-      if (rnd > 0.84 - 0.08 * uBurst){
-        vec2 o = (hash2(id) - 0.5) * 0.6;
-        o.x += 0.25 * sin(t * 1.7 + rnd * 40.0);
-        float d = length(f - o);
-        float life = 1.0 - smoothstep(0.0, 0.34 + 0.3 * uBurst, dy);
-        emb += (1.0 - smoothstep(0.0, 0.11, d)) * life * (0.6 + 0.4 * sin(t * 7.0 + rnd * 60.0));
-      }
-    }
-    col = mix(earth, vec3(1.0, 0.58, 0.16), clamp(emb, 0.0, 1.0) * on);
-    // Borde suavizado entre tierra y lava (sin escalones)
-    float px = 2.5 / uRes.y;
-    col = mix(col, vec3(1.0, 0.72, 0.30), (1.0 - smoothstep(0.0, px, dy)) * on);
-
-    float vig = smoothstep(0.35, 1.25, length((uv - 0.5) * vec2(asp, 1.0)));
-    col *= 1.0 - vig * 0.45 * (1.0 - uTheme);
-  } else {
-    /* ---- Lava: flujo con distorsión, costra y grietas incandescentes ---- */
-    float depth = -dy;
-    vec2 lp = p * 3.0 + vec2(t * 0.075, -t * 0.025);
-    vec2 w = vec2(fbm(lp + t * 0.11), fbm(lp + vec2(5.2, 1.3) - t * 0.09));
-    float n = fbm(lp + 2.2 * w);
-    vec2 v = voronoi(lp * 1.7 + w * 1.4, t * 0.35);
-    float edge = v.y - v.x;
-    float cracks = 1.0 - smoothstep(0.0, 0.10 + 0.08 * n, edge);
-    float crust = smoothstep(0.38, 0.72, n) * (1.0 - cracks);
-    float h = 0.52 + 0.5 * cracks + 0.3 * (n - 0.5) - 0.6 * crust;
-    h += 0.09 * sin(t * 2.2 + n * 14.0);
-    h -= depth * 0.22;
-    col = lavaRamp(h);
-
-    float rim = exp(-depth * 55.0);
-    col = mix(col, vec3(1.0, 0.78, 0.35), rim * 0.75);
-
-    vec2 bq = vec2(p.x * 8.0, (uv.y - t * 0.06) * 8.0);
-    vec2 bid = floor(bq); vec2 bf = fract(bq) - 0.5;
-    float br = hash(bid);
-    if (br > 0.82){
-      vec2 bo = (hash2(bid) - 0.5) * 0.5;
-      float rr = 0.08 + 0.1 * hash(bid + 3.7);
-      float bd = length(bf - bo);
-      float ring = (1.0 - smoothstep(rr - 0.03, rr, bd)) - (1.0 - smoothstep(rr - 0.08, rr - 0.04, bd));
-      col += vec3(1.0, 0.7, 0.25) * max(ring, 0.0) * 0.35 * (1.0 - smoothstep(0.0, 0.4, depth));
-    }
-    col += vec3(1.0, 0.4, 0.1) * uBurst * 0.06;
-  }
-  gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
-}`;
-
-  /* ---------- WebGL ---------- */
-  const cv = D.createElement('canvas');
-  cv.id = 'ac-lava';
-  D.body.prepend(cv);
-  let draw = null;
-  try {
-    const gl = cv.getContext('webgl', { antialias: false, depth: false, stencil: false,
-                                         powerPreference: 'high-performance' });
-    if (gl) draw = setup(gl);
-  } catch (e) { console.warn('Anghell WebGL:', e); }
-  if (!draw) {
-    cv.remove();
-    const f = D.createElement('div'); f.id = 'ac-lava-fallback'; D.body.prepend(f);
-  }
-
-  function setup(gl) {
-    const VS = 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }';
-    function sh(type, src) {
-      const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
-      return s;
-    }
-    const pr = gl.createProgram();
-    gl.attachShader(pr, sh(gl.VERTEX_SHADER, VS));
-    gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, FS));
-    gl.linkProgram(pr);
-    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
-    gl.useProgram(pr);
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-    const loc = gl.getAttribLocation(pr, 'a');
-    gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-    const U = n => gl.getUniformLocation(pr, n);
-    const uRes = U('uRes'), uTime = U('uTime'), uLevel = U('uLevel'),
-          uTheme = U('uTheme'), uBurst = U('uBurst');
-
-    // Calidad adaptativa: baja la resolución interna si el equipo va lento
-    let Q = innerWidth < 700 ? 0.5 : 0.6, slow = 0, last = 0;
-    function resize() {
-      const w = Math.max(2, Math.round(innerWidth * Q)), h = Math.max(2, Math.round(innerHeight * Q));
-      if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; gl.viewport(0, 0, w, h); }
-    }
-    return function (now, t, level) {
-      if (last) {
-        slow = (now - last) > 60 ? slow + 1 : Math.max(0, slow - 1);
-        if (slow > 90 && Q > 0.35) { Q -= 0.08; slow = 0; }
-      }
-      last = now;
-      resize();
-      gl.uniform2f(uRes, cv.width, cv.height);
-      gl.uniform1f(uTime, t % 3600);
-      gl.uniform1f(uLevel, level);
-      gl.uniform1f(uTheme, theme);
-      gl.uniform1f(uBurst, burst);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-    };
-  }
-
-  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  let lastDraw = 0;
-  function loop(now) {
-    // Máximo ~30 fps (o cada frame durante la transición) para no cargar el equipo
-    if (now - lastDraw >= 32 || burst > 0) {
-      lastDraw = now;
-      const t = (now - START) / 1000;
-      if (draw) draw(now, reduce ? t * 0.3 : t, levelAt(t));
-    }
-    requestAnimationFrame(loop);
-  }
-  requestAnimationFrame(loop);
-
-  /* ---------- Transición de tema: inundación de lava + giro de página ---------- */
-  function tween(from, to, ms, ease, set, done) {
-    const s = performance.now();
-    (function step(n) {
-      const k = Math.min(1, (n - s) / ms);
-      set(from + (to - from) * ease(k));
-      if (k < 1) requestAnimationFrame(step); else if (done) done();
-    })(s);
-  }
-  const easeIn = k => k * k * k;
-  const easeOut = k => 1 - Math.pow(1 - k, 3);
 
   function flipPage() {
     const m = D.querySelector('[data-testid="stMainBlockContainer"]') || D.querySelector('.block-container');
@@ -1211,19 +1011,23 @@ void main(){
     m.addEventListener('animationend', end);
   }
 
+  /* ---------- Cambio de tema: la lava inunda la pantalla y baja ---------- */
   let busy = false;
   btn.addEventListener('click', () => {
     if (busy) return;
     busy = true; btn.classList.add('ac-busy');
     const next = root.dataset.acTheme === 'light' ? 'dark' : 'light';
-    const swap = () => { root.dataset.acTheme = next; theme = next === 'light' ? 1 : 0; syncBtn(); flipPage(); };
-    const finish = () => { cv.style.zIndex = ''; busy = false; btn.classList.remove('ac-busy'); };
-    if (!draw || reduce) { swap(); finish(); return; }
-    cv.style.zIndex = '999990';                               // la lava pasa por encima de todo
-    tween(0, 1, 850, easeIn, v => burst = v, () => {          // erupción: cubre la pantalla
-      swap();                                                 // cambio de tema oculto bajo la lava
-      setTimeout(() => tween(1, 0, 1300, easeOut, v => burst = v, finish), 260);  // la lava baja
-    });
+    const swap = () => { root.dataset.acTheme = next; syncBtn(); flipPage(); };
+    if (reduce) { swap(); busy = false; btn.classList.remove('ac-busy'); return; }
+    lava.classList.add('ac-flood');
+    surge.classList.add('ac-up');
+    setTimeout(() => {
+      swap();
+      setTimeout(() => {
+        surge.classList.remove('ac-up');
+        setTimeout(() => { lava.classList.remove('ac-flood'); busy = false; btn.classList.remove('ac-busy'); }, 1150);
+      }, 250);
+    }, 780);
   });
 })();
 """
