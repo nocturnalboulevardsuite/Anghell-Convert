@@ -1,3 +1,5 @@
-streamlit>=1.36.0
-yt-dlp>=2025.1.1
+streamlit>=1.40.0
+yt-dlp[default]>=2025.11.12
+deno>=2.0.0
 imageio-ffmpeg>=0.5.1
+requests>=2.31.0
