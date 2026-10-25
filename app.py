@@ -537,8 +537,9 @@ def explain_error(err: Exception) -> str:
         return "No hubo respuesta del sitio. Revisa tu conexión a internet e inténtalo de nuevo."
     if "sign in to confirm" in low or "not a bot" in low:
         if ON_CLOUD:
-            return ("YouTube bloqueó al servidor con su verificación anti-bot. Sube un archivo cookies.txt "
-                    "en Opciones avanzadas o ejecuta la app en tu computador.")
+            return ("YouTube bloquea las conexiones desde servidores en la nube con su verificación anti-bot. "
+                    "Agrega YOUTUBE_COOKIES, PROXY o COBALT_API_URL en los Secrets de la app (ver Opciones "
+                    "avanzadas), o ejecuta la app en tu computador.")
         return ("YouTube pidió verificar que no eres un bot y no encontré una sesión de YouTube en tus "
                 "navegadores. Inicia sesión en youtube.com con Firefox (o cierra Chrome/Edge si lo usas) "
                 "y vuelve a convertir, o sube un archivo cookies.txt en Opciones avanzadas.")
@@ -584,6 +585,102 @@ BROWSER_LABELS = {"Automático": "auto", "No usar": None, "Firefox": "firefox", 
 # En Streamlit Community Cloud el código vive en /mount/src: ahí no hay navegador del que leer cookies
 ON_CLOUD = os.path.exists("/mount/src") or bool(os.environ.get("STREAMLIT_SHARING_MODE"))
 
+def secret(name: str, default: str = "") -> str:
+    """Lee un valor de .streamlit/secrets.toml (o de Secrets en Streamlit Cloud) o de una variable de entorno."""
+    try:
+        val = st.secrets.get(name)
+        if val:
+            return str(val).strip()
+    except Exception:
+        pass
+    return os.environ.get(name, default).strip()
+
+
+PROXY = secret("PROXY")                       # ej. http://usuario:clave@proxy-residencial:8000
+COBALT_URL = secret("COBALT_API_URL").rstrip("/")
+COBALT_KEY = secret("COBALT_API_KEY")
+
+
+def secret_cookiefile():
+    """Cookies de YouTube guardadas en los secrets (contenido completo de cookies.txt)."""
+    content = secret("YOUTUBE_COOKIES")
+    if not content:
+        return None
+    path = os.path.join(tempfile.gettempdir(), "anghell_secret_cookies.txt")
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content if content.endswith("\n") else content + "\n")
+    return path
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def oembed_info(url: str) -> dict:
+    """Título y miniatura vía oEmbed de YouTube: funciona aunque YouTube pida la verificación anti-bot."""
+    r = requests.get("https://www.youtube.com/oembed", params={"url": url, "format": "json"},
+                     headers=MI_HEADERS, timeout=15)
+    r.raise_for_status()
+    j = r.json()
+    return {"title": j.get("title") or "Sin título", "uploader": j.get("author_name") or "",
+            "duration": 0, "thumbnail": j.get("thumbnail_url"), "max_height": 0, "limited": True}
+
+
+def cobalt_download(url: str, choice: str, bar) -> dict:
+    """Descarga mediante una instancia propia de cobalt (el mismo tipo de servicio que usan las webs
+    de 'YouTube a MP3'), y deja el archivo en el formato elegido."""
+    cfg = FORMATS[choice]
+    body = {"url": url, "filenameStyle": "basic"}
+    if cfg["kind"] == "audio":
+        body.update({"downloadMode": "audio", "audioFormat": cfg["ext"], "audioBitrate": "320"})
+    else:
+        h = cfg["height"]
+        body.update({"downloadMode": "auto", "videoQuality": str(h),
+                     "youtubeVideoCodec": "h264" if h <= 1080 else "vp9"})
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if COBALT_KEY:
+        headers["Authorization"] = f"Api-Key {COBALT_KEY}"
+    bar.progress(0, text="Pidiendo el archivo al servidor de descarga")
+    r = requests.post(COBALT_URL + "/", json=body, headers=headers, timeout=60)
+    j = r.json()
+    if j.get("status") not in ("tunnel", "redirect"):
+        code = (j.get("error") or {}).get("code", j.get("status"))
+        raise RuntimeError(f"cobalt respondió: {code}")
+
+    with tempfile.TemporaryDirectory() as d:
+        name = j.get("filename") or "descarga"
+        raw = os.path.join(d, "raw_" + re.sub(r'[\\/:*?"<>|]+', "", name))
+        with requests.get(j["url"], stream=True, timeout=600) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            with open(raw, "wb") as fh:
+                for chunk in resp.iter_content(1024 * 256):
+                    fh.write(chunk)
+                    done += len(chunk)
+                    pct = min(done / total, 1.0) if total else 0
+                    bar.progress(pct, text=f"Descargando {pct * 100:.0f}%" if total
+                                 else f"Descargando {done / 1048576:.1f} MB")
+        base = os.path.splitext(name)[0] or "descarga"
+        final = os.path.join(d, f"{base}.{cfg['ext']}")
+        if not raw.lower().endswith("." + cfg["ext"]):
+            bar.progress(1.0, text="Convirtiendo con FFmpeg")
+            if cfg["kind"] == "audio":
+                codec = ["-c:a", "libmp3lame", "-b:a", "320k"] if cfg["ext"] == "mp3" else ["-c:a", "pcm_s16le"]
+                cmd = [FFMPEG, "-y", "-v", "error", "-i", raw, "-vn"] + codec + [final]
+                subprocess.run(cmd, check=True, capture_output=True)
+            else:
+                copy = subprocess.run([FFMPEG, "-y", "-v", "error", "-i", raw, "-c", "copy",
+                                       "-movflags", "+faststart", final], capture_output=True)
+                if copy.returncode != 0:
+                    subprocess.run([FFMPEG, "-y", "-v", "error", "-i", raw, "-c:v", "libx264", "-preset",
+                                    "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k", final],
+                                   check=True, capture_output=True)
+        else:
+            final = raw
+        with open(final, "rb") as fh:
+            data = fh.read()
+    return {"name": f"{base}.{cfg['ext']}", "data": data, "mime": cfg["mime"]}
+
+
 
 def base_opts(auth=None, clients=None) -> dict:
     opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
@@ -593,6 +690,8 @@ def base_opts(auth=None, clients=None) -> dict:
         opts["ffmpeg_location"] = FFMPEG
     if JS_RUNTIME:
         opts["js_runtimes"] = JS_RUNTIME
+    if PROXY:
+        opts["proxy"] = PROXY
     if auth:
         opts.update(auth)
     if clients:
@@ -661,7 +760,14 @@ def get_info(url: str, cookiefile=None, browser="auto") -> dict:
     def task(auth, clients):
         with yt_dlp.YoutubeDL({**base_opts(auth, clients), "skip_download": True}) as ydl:
             return ydl.extract_info(url, download=False)
-    info = run_youtube(task, cookiefile, browser)
+    try:
+        info = run_youtube(task, cookiefile, browser)
+    except yt_dlp.utils.DownloadError as e:
+        if is_bot_check(e) or is_retryable(e):
+            data = oembed_info(url)
+            data["blocked"] = str(e)
+            return data
+        raise
     heights = sorted({f.get("height") for f in info.get("formats") or [] if f.get("height")})
     return {
         "title": info.get("title") or "Sin título",
@@ -746,6 +852,17 @@ def convert(url: str, choice: str, cookiefile=None, browser="auto"):
         result = run_youtube(task, cookiefile, browser, on_attempt)
         bar.progress(1.0, text="Listo")
         return result
+    except yt_dlp.utils.DownloadError as e:
+        if COBALT_URL and FFMPEG and (is_bot_check(e) or is_retryable(e)):
+            try:
+                result = cobalt_download(url, choice, bar)
+                bar.progress(1.0, text="Listo")
+                return result
+            except Exception as ce:
+                bar.empty()
+                raise RuntimeError(f"{e}\n\nPlan B (cobalt) también falló: {ce}") from ce
+        bar.empty()
+        raise
     except Exception:
         bar.empty()
         raise
@@ -1060,8 +1177,16 @@ with tab_yt:
             'En Chrome y Edge cierra el navegador antes de convertir, porque bloquean sus cookies '
             'mientras están abiertos; con Firefox no hace falta.</div>', unsafe_allow_html=True)
         if ON_CLOUD:
-            st.warning("La app está en un servidor en la nube: ahí no hay navegador del que tomar la sesión. "
-                       "Sube un archivo cookies.txt o ejecuta la app en tu computador.")
+            st.warning("La app está en un servidor en la nube y YouTube bloquea esas conexiones. "
+                       "Configura al menos uno de los métodos de abajo en los Secrets de la app, "
+                       "o ejecuta la app en tu computador, donde normalmente funciona sin nada extra.")
+        ok, no = "activo", "no configurado"
+        st.markdown(
+            '<div class="ac-help">'
+            f'<b>Cookies en Secrets</b> (YOUTUBE_COOKIES): {ok if secret("YOUTUBE_COOKIES") else no}<br>'
+            f'<b>Proxy residencial</b> (PROXY): {ok if PROXY else no}<br>'
+            f'<b>Servidor cobalt</b> (COBALT_API_URL): {ok if COBALT_URL else no}</div>',
+            unsafe_allow_html=True)
         browser_label = st.selectbox("Sesión del navegador", list(BROWSER_LABELS.keys()), index=0,
                                      key="browser", disabled=ON_CLOUD,
                                      help="Automático prueba Firefox, Edge, Chrome, Brave, Opera, Vivaldi y Safari "
@@ -1079,7 +1204,7 @@ with tab_yt:
             except Exception as e:
                 show_error(e, "No se pudo actualizar.")
     browser = None if ON_CLOUD else BROWSER_LABELS[browser_label]
-    cookiefile = None
+    cookiefile = secret_cookiefile()
     if cookie_up is not None:
         cookiefile = os.path.join(tempfile.gettempdir(), f"anghell_cookies_{abs(hash(cookie_up.name))}.txt")
         with open(cookiefile, "wb") as fh:
@@ -1098,12 +1223,18 @@ with tab_yt:
                 st.markdown(
                     f'<div class="ac-card">{thumb}<div>'
                     f'<div class="t">{html.escape(info["title"])}</div>'
-                    f'<div class="m">{html.escape(info["uploader"])} | {fmt_duration(info["duration"])}'
-                    f' | hasta {info["max_height"]}p</div></div></div>',
+                    f'<div class="m">{html.escape(info["uploader"])}'
+                    + ("" if info.get("limited") else
+                       f' | {fmt_duration(info["duration"])} | hasta {info["max_height"]}p')
+                    + '</div></div></div>',
                     unsafe_allow_html=True,
                 )
             except Exception as e:
                 show_error(e, "No se pudo leer el video.")
+
+    if info and info.get("blocked") and not COBALT_URL:
+        st.warning("YouTube está pidiendo la verificación anti-bot a esta conexión, así que la conversión "
+                   "probablemente falle. Abre Opciones avanzadas para ver cómo resolverlo.")
 
     choice = st.radio("Formato", list(FORMATS.keys()), horizontal=True, index=0, key="yt_fmt")
 
